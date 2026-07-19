@@ -2,6 +2,7 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
 const pool = require('../db');
 const { emailValido } = require('../utils/validacao');
 
@@ -97,6 +98,89 @@ router.post('/login', async (req, res) => {
     } catch (err) {
         console.error(err);
         res.status(500).json({ erro: 'Erro ao autenticar' });
+    }
+});
+
+// POST /auth/esqueci-senha
+// Gera um token de redefinição válido por 1 hora. Nessa versão simplificada,
+// devolve o link diretamente na resposta (sem envio de e-mail automático) —
+// quem estiver logado como admin deve copiar e enviar manualmente para a pessoa.
+router.post('/esqueci-senha', async (req, res) => {
+    const { email, associacao_id } = req.body;
+
+    if (!email || !associacao_id) {
+        return res.status(400).json({ erro: 'email e associacao_id são obrigatórios' });
+    }
+
+    try {
+        const resultado = await pool.query(
+            `SELECT id FROM usuarios WHERE email = $1 AND associacao_id = $2 AND ativo = true`,
+            [email, associacao_id]
+        );
+
+        const usuario = resultado.rows[0];
+        if (!usuario) {
+            // Não revela se o e-mail existe ou não, por segurança
+            return res.json({ ok: true, mensagem: 'Se o e-mail existir, um link de redefinição foi gerado.' });
+        }
+
+        const tokenBruto = crypto.randomBytes(32).toString('hex');
+        const tokenHash = crypto.createHash('sha256').update(tokenBruto).digest('hex');
+        const expiraEm = new Date(Date.now() + 60 * 60 * 1000); // 1 hora
+
+        await pool.query(
+            `INSERT INTO password_resets (usuario_id, token_hash, expira_em) VALUES ($1, $2, $3)`,
+            [usuario.id, tokenHash, expiraEm]
+        );
+
+        res.json({ ok: true, token: tokenBruto });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ erro: 'Erro ao gerar redefinição de senha' });
+    }
+});
+
+// POST /auth/redefinir-senha
+router.post('/redefinir-senha', async (req, res) => {
+    const { token, senha_nova } = req.body;
+
+    if (!token || !senha_nova) {
+        return res.status(400).json({ erro: 'token e senha_nova são obrigatórios' });
+    }
+    if (senha_nova.length < 6) {
+        return res.status(400).json({ erro: 'a nova senha deve ter ao menos 6 caracteres' });
+    }
+
+    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+
+        const resultado = await client.query(
+            `SELECT id, usuario_id, expira_em, usado FROM password_resets WHERE token_hash = $1`,
+            [tokenHash]
+        );
+        const registro = resultado.rows[0];
+
+        if (!registro || registro.usado || new Date(registro.expira_em) < new Date()) {
+            await client.query('ROLLBACK');
+            return res.status(400).json({ erro: 'Link de redefinição inválido ou expirado' });
+        }
+
+        const senhaHash = await bcrypt.hash(senha_nova, 10);
+
+        await client.query(`UPDATE usuarios SET senha_hash = $1 WHERE id = $2`, [senhaHash, registro.usuario_id]);
+        await client.query(`UPDATE password_resets SET usado = true WHERE id = $1`, [registro.id]);
+
+        await client.query('COMMIT');
+        res.json({ ok: true });
+    } catch (err) {
+        await client.query('ROLLBACK');
+        console.error(err);
+        res.status(500).json({ erro: 'Erro ao redefinir senha' });
+    } finally {
+        client.release();
     }
 });
 
