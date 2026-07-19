@@ -9,11 +9,12 @@ const cobrancasRoutes = require('./routes/cobrancas');
 const comunicadosRoutes = require('./routes/comunicados');
 const usuariosRoutes = require('./routes/usuarios');
 const portalRoutes = require('./routes/portal');
+const configuracoesRoutes = require('./routes/configuracoes');
 
 const app = express();
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '6mb' }));
 
 app.use('/auth', authRoutes);
 app.use('/associados', associadosRoutes);
@@ -21,6 +22,7 @@ app.use('/cobrancas', cobrancasRoutes);
 app.use('/comunicados', comunicadosRoutes);
 app.use('/usuarios', usuariosRoutes);
 app.use('/portal', portalRoutes);
+app.use('/configuracoes', configuracoesRoutes);
 
 app.get('/', (req, res) => {
     res.json({ status: 'ok', servico: 'plataforma-associacoes-api' });

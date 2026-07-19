@@ -99,4 +99,52 @@ router.get('/minhas-cobrancas', async (req, res) => {
     }
 });
 
+// PUT /portal/minhas-cobrancas/:id/comprovante — associado envia comprovante de pagamento
+router.put('/minhas-cobrancas/:id/comprovante', async (req, res) => {
+    const { id } = req.params;
+    const { comprovante_base64 } = req.body;
+
+    if (!comprovante_base64) {
+        return res.status(400).json({ erro: 'comprovante_base64 é obrigatório' });
+    }
+    if (comprovante_base64.length > 2_800_000) {
+        return res.status(400).json({ erro: 'Arquivo muito grande. Escolha uma imagem menor.' });
+    }
+    if (!comprovante_base64.startsWith('data:image/') && !comprovante_base64.startsWith('data:application/pdf')) {
+        return res.status(400).json({ erro: 'Envie uma imagem ou PDF do comprovante' });
+    }
+
+    const client = await comConexaoTenant(req.usuario.associacao_id);
+    try {
+        const associado = await client.query(`SELECT id FROM associados WHERE usuario_id = $1`, [req.usuario.id]);
+        if (associado.rows.length === 0) {
+            return res.status(404).json({ erro: 'Nenhum cadastro de associado vinculado a esse login' });
+        }
+
+        const cobranca = await client.query(
+            `SELECT id, status FROM cobrancas WHERE id = $1 AND associado_id = $2`,
+            [id, associado.rows[0].id]
+        );
+        if (cobranca.rows.length === 0) {
+            return res.status(404).json({ erro: 'Cobrança não encontrada' });
+        }
+        if (cobranca.rows[0].status === 'pago') {
+            return res.status(409).json({ erro: 'Essa cobrança já está paga' });
+        }
+
+        await client.query(
+            `UPDATE cobrancas
+             SET comprovante_base64 = $1, comprovante_enviado_em = now(), status = 'aguardando_confirmacao'
+             WHERE id = $2`,
+            [comprovante_base64, id]
+        );
+        res.json({ ok: true });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ erro: 'Erro ao enviar comprovante' });
+    } finally {
+        client.release();
+    }
+});
+
 module.exports = router;

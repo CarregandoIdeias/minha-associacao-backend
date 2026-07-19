@@ -5,8 +5,8 @@ const { autenticar, autorizar, comConexaoTenant } = require('../middleware/auth'
 const router = express.Router();
 router.use(autenticar);
 
-// GET /cobrancas — lista cobranças da associação, com filtro opcional por status ou associado
-router.get('/', async (req, res) => {
+// GET /cobrancas — lista cobranças da associação, com filtro opcional por status ou associado (só admin/diretoria)
+router.get('/', autorizar('admin', 'diretoria'), async (req, res) => {
     const { status, associado_id } = req.query;
     const client = await comConexaoTenant(req.usuario.associacao_id);
     try {
@@ -26,7 +26,8 @@ router.get('/', async (req, res) => {
 
         const resultado = await client.query(
             `SELECT c.id, c.descricao, c.valor, c.vencimento, c.status, c.metodo,
-                    a.nome_completo AS associado_nome, c.associado_id
+                    a.nome_completo AS associado_nome, c.associado_id,
+                    (c.comprovante_base64 IS NOT NULL) AS tem_comprovante
              FROM cobrancas c
              JOIN associados a ON a.id = c.associado_id
              ${where}
@@ -120,6 +121,27 @@ router.patch('/:id/pagar', autorizar('admin', 'diretoria'), async (req, res) => 
         await client.query('ROLLBACK');
         console.error(err);
         res.status(500).json({ erro: 'Erro ao registrar pagamento' });
+    } finally {
+        client.release();
+    }
+});
+
+// GET /cobrancas/:id/comprovante — retorna o comprovante enviado pelo associado (admin/diretoria)
+router.get('/:id/comprovante', autorizar('admin', 'diretoria'), async (req, res) => {
+    const { id } = req.params;
+    const client = await comConexaoTenant(req.usuario.associacao_id);
+    try {
+        const resultado = await client.query(
+            `SELECT comprovante_base64, comprovante_enviado_em FROM cobrancas WHERE id = $1`,
+            [id]
+        );
+        if (resultado.rows.length === 0 || !resultado.rows[0].comprovante_base64) {
+            return res.status(404).json({ erro: 'Nenhum comprovante encontrado para essa cobrança' });
+        }
+        res.json(resultado.rows[0]);
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ erro: 'Erro ao buscar comprovante' });
     } finally {
         client.release();
     }
