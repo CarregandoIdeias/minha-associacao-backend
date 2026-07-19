@@ -50,6 +50,35 @@ router.post('/', autorizar('admin', 'diretoria'), async (req, res) => {
     }
 });
 
+// PUT /comunicados/:id — edita um comunicado (só admin/diretoria)
+router.put('/:id', autorizar('admin', 'diretoria'), async (req, res) => {
+    const { id } = req.params;
+    const { titulo, conteudo, categoria_alvo } = req.body;
+
+    if (!titulo || !conteudo) {
+        return res.status(400).json({ erro: 'titulo e conteudo são obrigatórios' });
+    }
+
+    const client = await comConexaoTenant(req.usuario.associacao_id);
+    try {
+        const resultado = await client.query(
+            `UPDATE comunicados SET titulo = $1, conteudo = $2, categoria_alvo = $3
+             WHERE id = $4
+             RETURNING id, titulo, conteudo, categoria_alvo, publicado_em`,
+            [titulo, conteudo, categoria_alvo || null, id]
+        );
+        if (resultado.rows.length === 0) {
+            return res.status(404).json({ erro: 'Comunicado não encontrado' });
+        }
+        res.json(resultado.rows[0]);
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ erro: 'Erro ao editar comunicado' });
+    } finally {
+        client.release();
+    }
+});
+
 // DELETE /comunicados/:id — remove um comunicado (só admin/diretoria)
 router.delete('/:id', autorizar('admin', 'diretoria'), async (req, res) => {
     const { id } = req.params;

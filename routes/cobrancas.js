@@ -125,4 +125,59 @@ router.patch('/:id/pagar', autorizar('admin', 'diretoria'), async (req, res) => 
     }
 });
 
+// PUT /cobrancas/:id — edita uma cobrança (só se ainda não estiver paga)
+router.put('/:id', autorizar('admin', 'diretoria'), async (req, res) => {
+    const { id } = req.params;
+    const { descricao, valor, vencimento } = req.body;
+
+    if (!valor || !vencimento) {
+        return res.status(400).json({ erro: 'valor e vencimento são obrigatórios' });
+    }
+    if (isNaN(parseFloat(valor)) || parseFloat(valor) < 0) {
+        return res.status(400).json({ erro: 'valor inválido' });
+    }
+
+    const client = await comConexaoTenant(req.usuario.associacao_id);
+    try {
+        const atual = await client.query(`SELECT status FROM cobrancas WHERE id = $1`, [id]);
+        if (atual.rows.length === 0) {
+            return res.status(404).json({ erro: 'Cobrança não encontrada' });
+        }
+        if (atual.rows[0].status === 'pago') {
+            return res.status(409).json({ erro: 'Não é possível editar uma cobrança já paga' });
+        }
+
+        const resultado = await client.query(
+            `UPDATE cobrancas SET descricao = $1, valor = $2, vencimento = $3
+             WHERE id = $4
+             RETURNING id, descricao, valor, vencimento, status`,
+            [descricao || 'Mensalidade', valor, vencimento, id]
+        );
+        res.json(resultado.rows[0]);
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ erro: 'Erro ao editar cobrança' });
+    } finally {
+        client.release();
+    }
+});
+
+// DELETE /cobrancas/:id — remove uma cobrança (só admin)
+router.delete('/:id', autorizar('admin'), async (req, res) => {
+    const { id } = req.params;
+    const client = await comConexaoTenant(req.usuario.associacao_id);
+    try {
+        const resultado = await client.query(`DELETE FROM cobrancas WHERE id = $1 RETURNING id`, [id]);
+        if (resultado.rows.length === 0) {
+            return res.status(404).json({ erro: 'Cobrança não encontrada' });
+        }
+        res.json({ ok: true });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ erro: 'Erro ao excluir cobrança' });
+    } finally {
+        client.release();
+    }
+});
+
 module.exports = router;

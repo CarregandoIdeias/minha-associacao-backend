@@ -84,4 +84,62 @@ router.patch('/:id/desativar', autorizar('admin'), async (req, res) => {
     }
 });
 
+// PUT /usuarios/:id — edita nome e papel de um usuário (só admin, não pode alterar o próprio papel)
+router.put('/:id', autorizar('admin'), async (req, res) => {
+    const { id } = req.params;
+    const { nome, papel } = req.body;
+
+    if (!nome || !nome.trim()) {
+        return res.status(400).json({ erro: 'nome é obrigatório' });
+    }
+    if (papel && !['admin', 'diretoria', 'associado'].includes(papel)) {
+        return res.status(400).json({ erro: 'papel inválido' });
+    }
+    if (id === req.usuario.id && papel && papel !== 'admin') {
+        return res.status(400).json({ erro: 'Você não pode alterar o seu próprio papel' });
+    }
+
+    const client = await comConexaoTenant(req.usuario.associacao_id);
+    try {
+        const resultado = await client.query(
+            `UPDATE usuarios SET nome = $1, papel = COALESCE($2, papel)
+             WHERE id = $3
+             RETURNING id, nome, email, papel, ativo, criado_em`,
+            [nome.trim(), papel || null, id]
+        );
+        if (resultado.rows.length === 0) {
+            return res.status(404).json({ erro: 'Usuário não encontrado' });
+        }
+        res.json(resultado.rows[0]);
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ erro: 'Erro ao editar usuário' });
+    } finally {
+        client.release();
+    }
+});
+
+// DELETE /usuarios/:id — remove permanentemente um usuário (só admin, não pode remover a si mesmo)
+router.delete('/:id', autorizar('admin'), async (req, res) => {
+    const { id } = req.params;
+
+    if (id === req.usuario.id) {
+        return res.status(400).json({ erro: 'Você não pode excluir seu próprio usuário' });
+    }
+
+    const client = await comConexaoTenant(req.usuario.associacao_id);
+    try {
+        const resultado = await client.query(`DELETE FROM usuarios WHERE id = $1 RETURNING id`, [id]);
+        if (resultado.rows.length === 0) {
+            return res.status(404).json({ erro: 'Usuário não encontrado' });
+        }
+        res.json({ ok: true });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ erro: 'Erro ao excluir usuário' });
+    } finally {
+        client.release();
+    }
+});
+
 module.exports = router;
