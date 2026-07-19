@@ -129,6 +129,7 @@ router.patch('/:id/pagar', autorizar('admin', 'diretoria'), async (req, res) => 
 // GET /cobrancas/:id/comprovante — retorna o comprovante enviado pelo associado (admin/diretoria)
 router.get('/:id/comprovante', autorizar('admin', 'diretoria'), async (req, res) => {
     const { id } = req.params;
+    res.set('Cache-Control', 'no-store');
     const client = await comConexaoTenant(req.usuario.associacao_id);
     try {
         const resultado = await client.query(
