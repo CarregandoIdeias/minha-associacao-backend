@@ -12,7 +12,7 @@ router.get('/meus-dados', async (req, res) => {
     const client = await comConexaoTenant(req.usuario.associacao_id);
     try {
         const resultado = await client.query(
-            `SELECT id, nome_completo, cpf, telefone, categoria, status, data_ingresso
+            `SELECT id, nome_completo, cpf, telefone, categoria, status, data_ingresso, foto_base64
              FROM associados
              WHERE usuario_id = $1`,
             [req.usuario.id]
@@ -24,6 +24,39 @@ router.get('/meus-dados', async (req, res) => {
     } catch (err) {
         console.error(err);
         res.status(500).json({ erro: 'Erro ao buscar seus dados' });
+    } finally {
+        client.release();
+    }
+});
+
+// PUT /portal/minha-foto — atualiza a foto do associado vinculado ao usuário logado
+router.put('/minha-foto', async (req, res) => {
+    const { foto_base64 } = req.body;
+
+    if (!foto_base64) {
+        return res.status(400).json({ erro: 'foto_base64 é obrigatório' });
+    }
+    // Limite de ~2MB em base64, para não sobrecarregar o banco
+    if (foto_base64.length > 2_800_000) {
+        return res.status(400).json({ erro: 'Imagem muito grande. Escolha uma foto menor.' });
+    }
+    if (!foto_base64.startsWith('data:image/')) {
+        return res.status(400).json({ erro: 'Formato de imagem inválido' });
+    }
+
+    const client = await comConexaoTenant(req.usuario.associacao_id);
+    try {
+        const resultado = await client.query(
+            `UPDATE associados SET foto_base64 = $1 WHERE usuario_id = $2 RETURNING id`,
+            [foto_base64, req.usuario.id]
+        );
+        if (resultado.rows.length === 0) {
+            return res.status(404).json({ erro: 'Nenhum cadastro de associado vinculado a esse login' });
+        }
+        res.json({ ok: true });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ erro: 'Erro ao salvar foto' });
     } finally {
         client.release();
     }
