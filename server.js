@@ -7,6 +7,7 @@ const authRoutes = require('./routes/auth');
 const associadosRoutes = require('./routes/associados');
 const cobrancasRoutes = require('./routes/cobrancas');
 const comunicadosRoutes = require('./routes/comunicados');
+const usuariosRoutes = require('./routes/usuarios');
 
 const app = express();
 
@@ -17,6 +18,7 @@ app.use('/auth', authRoutes);
 app.use('/associados', associadosRoutes);
 app.use('/cobrancas', cobrancasRoutes);
 app.use('/comunicados', comunicadosRoutes);
+app.use('/usuarios', usuariosRoutes);
 
 app.get('/', (req, res) => {
     res.json({ status: 'ok', servico: 'plataforma-associacoes-api' });
