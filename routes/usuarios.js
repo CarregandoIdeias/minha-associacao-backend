@@ -2,6 +2,7 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const { autenticar, autorizar, comConexaoTenant } = require('../middleware/auth');
+const { emailValido } = require('../utils/validacao');
 
 const router = express.Router();
 router.use(autenticar);
@@ -30,6 +31,9 @@ router.post('/', autorizar('admin'), async (req, res) => {
 
     if (!nome || !email || !senha || !papel) {
         return res.status(400).json({ erro: 'nome, email, senha e papel são obrigatórios' });
+    }
+    if (!emailValido(email)) {
+        return res.status(400).json({ erro: 'e-mail inválido' });
     }
     if (!['diretoria', 'associado'].includes(papel)) {
         return res.status(400).json({ erro: 'papel deve ser "diretoria" ou "associado"' });

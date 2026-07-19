@@ -3,6 +3,7 @@ const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const pool = require('../db');
+const { emailValido } = require('../utils/validacao');
 
 const router = express.Router();
 const JWT_SECRET = process.env.JWT_SECRET || 'troque-isso-em-producao';
@@ -14,6 +15,9 @@ router.post('/registrar-associacao', async (req, res) => {
 
     if (!nome_associacao || !nome_admin || !email || !senha) {
         return res.status(400).json({ erro: 'Campos obrigatórios faltando' });
+    }
+    if (!emailValido(email)) {
+        return res.status(400).json({ erro: 'e-mail inválido' });
     }
 
     const client = await pool.connect();
