@@ -9,8 +9,8 @@ const router = express.Router();
 // Todas as rotas abaixo exigem estar logado
 router.use(autenticar);
 
-// GET /associados — lista os associados da associação do usuário logado
-router.get('/', async (req, res) => {
+// GET /associados — lista os associados da associação do usuário logado (só admin/diretoria)
+router.get('/', autorizar('admin', 'diretoria'), async (req, res) => {
     const client = await comConexaoTenant(req.usuario.associacao_id);
     try {
         const resultado = await client.query(

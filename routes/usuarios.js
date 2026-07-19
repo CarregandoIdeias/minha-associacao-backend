@@ -27,7 +27,7 @@ router.get('/', autorizar('admin'), async (req, res) => {
 
 // POST /usuarios — convida/cria um novo usuário na mesma associação (só admin)
 router.post('/', autorizar('admin'), async (req, res) => {
-    const { nome, email, senha, papel } = req.body;
+    const { nome, email, senha, papel, associado_id } = req.body;
 
     if (!nome || !email || !senha || !papel) {
         return res.status(400).json({ erro: 'nome, email, senha e papel são obrigatórios' });
@@ -41,9 +41,14 @@ router.post('/', autorizar('admin'), async (req, res) => {
     if (senha.length < 6) {
         return res.status(400).json({ erro: 'senha deve ter ao menos 6 caracteres' });
     }
+    if (papel === 'associado' && !associado_id) {
+        return res.status(400).json({ erro: 'associado_id é obrigatório para o papel "associado"' });
+    }
 
     const client = await comConexaoTenant(req.usuario.associacao_id);
     try {
+        await client.query('BEGIN');
+
         const senhaHash = await bcrypt.hash(senha, 10);
 
         const resultado = await client.query(
@@ -52,13 +57,44 @@ router.post('/', autorizar('admin'), async (req, res) => {
              RETURNING id, nome, email, papel, ativo, criado_em`,
             [req.usuario.associacao_id, nome, email, senhaHash, papel]
         );
-        res.status(201).json(resultado.rows[0]);
+        const novoUsuario = resultado.rows[0];
+
+        if (papel === 'associado') {
+            const vinculo = await client.query(
+                `UPDATE associados SET usuario_id = $1 WHERE id = $2 AND usuario_id IS NULL RETURNING id`,
+                [novoUsuario.id, associado_id]
+            );
+            if (vinculo.rows.length === 0) {
+                await client.query('ROLLBACK');
+                return res.status(409).json({ erro: 'Esse associado não existe ou já tem um login vinculado' });
+            }
+        }
+
+        await client.query('COMMIT');
+        res.status(201).json(novoUsuario);
     } catch (err) {
+        await client.query('ROLLBACK');
         if (err.code === '23505') {
             return res.status(409).json({ erro: 'Já existe um usuário com esse e-mail nessa associação' });
         }
         console.error(err);
         res.status(500).json({ erro: 'Erro ao criar usuário' });
+    } finally {
+        client.release();
+    }
+});
+
+// GET /usuarios/associados-sem-login — lista associados que ainda não têm usuário vinculado (só admin)
+router.get('/associados-sem-login', autorizar('admin'), async (req, res) => {
+    const client = await comConexaoTenant(req.usuario.associacao_id);
+    try {
+        const resultado = await client.query(
+            `SELECT id, nome_completo FROM associados WHERE usuario_id IS NULL ORDER BY nome_completo`
+        );
+        res.json(resultado.rows);
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ erro: 'Erro ao listar associados sem login' });
     } finally {
         client.release();
     }
