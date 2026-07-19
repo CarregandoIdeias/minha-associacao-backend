@@ -1,0 +1,727 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Minha Associação — Painel</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #f7f5f3;
+    --bg-card: #ffffff;
+    --text: #1a1a1a;
+    --text-muted: #6b6b6b;
+    --border: #e5e0dd;
+    --accent: #8B1A1A;
+    --accent-hover: #6f1414;
+    --accent-soft: rgba(139, 26, 26, 0.08);
+    --success: #2f7d4f;
+    --warning: #b8860b;
+    --danger: #b23a3a;
+    --shadow: 0 1px 3px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);
+  }
+
+  [data-theme="dark"] {
+    --bg: #171514;
+    --bg-card: #221f1e;
+    --text: #f1efed;
+    --text-muted: #a8a29c;
+    --border: #35302e;
+    --accent: #c23c3c;
+    --accent-hover: #d95050;
+    --accent-soft: rgba(194, 60, 60, 0.12);
+    --shadow: 0 1px 3px rgba(0,0,0,0.3), 0 1px 2px rgba(0,0,0,0.2);
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: 'Poppins', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    transition: background 0.2s, color 0.2s;
+  }
+
+  header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 18px 32px;
+    background: var(--bg-card);
+    border-bottom: 1px solid var(--border);
+  }
+
+  .logo {
+    font-weight: 700;
+    font-size: 18px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .logo span { color: var(--accent); }
+
+  .header-actions { display: flex; align-items: center; gap: 14px; }
+
+  .theme-toggle {
+    background: var(--accent-soft);
+    border: none;
+    border-radius: 10px;
+    width: 38px;
+    height: 38px;
+    font-size: 16px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--accent);
+  }
+
+  .btn {
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    padding: 10px 18px;
+    border-radius: 10px;
+    font-weight: 600;
+    font-size: 14px;
+    cursor: pointer;
+    transition: background 0.15s;
+    font-family: inherit;
+  }
+  .btn:hover { background: var(--accent-hover); }
+  .btn-ghost {
+    background: transparent;
+    color: var(--text-muted);
+    border: 1px solid var(--border);
+  }
+  .btn-ghost:hover { background: var(--accent-soft); color: var(--accent); }
+
+  main { max-width: 1100px; margin: 0 auto; padding: 32px; }
+
+  /* ---------- Tela de login ---------- */
+  #tela-login {
+    max-width: 420px;
+    margin: 60px auto;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 36px;
+    box-shadow: var(--shadow);
+  }
+  #tela-login h2 { font-size: 20px; margin-bottom: 6px; }
+  #tela-login p.sub { color: var(--text-muted); font-size: 13px; margin-bottom: 24px; }
+
+  .campo { margin-bottom: 16px; }
+  .campo label {
+    display: block;
+    font-size: 13px;
+    font-weight: 500;
+    margin-bottom: 6px;
+    color: var(--text-muted);
+  }
+  .campo input {
+    width: 100%;
+    padding: 11px 14px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--bg);
+    color: var(--text);
+    font-family: inherit;
+    font-size: 14px;
+  }
+  .campo input:focus { outline: none; border-color: var(--accent); }
+
+  #erro-login {
+    color: var(--danger);
+    font-size: 13px;
+    margin-top: 10px;
+    display: none;
+  }
+
+  /* ---------- Dashboard ---------- */
+  #tela-dashboard { display: none; }
+
+  .kpis {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 16px;
+    margin-bottom: 28px;
+  }
+  .kpi-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 20px;
+    box-shadow: var(--shadow);
+  }
+  .kpi-card .valor { font-size: 28px; font-weight: 700; margin-top: 4px; }
+  .kpi-card .rotulo { font-size: 13px; color: var(--text-muted); }
+  .kpi-card.ativo .valor { color: var(--success); }
+  .kpi-card.inadimplente .valor { color: var(--warning); }
+
+  .painel {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    box-shadow: var(--shadow);
+    overflow: hidden;
+  }
+  .painel-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 18px 22px;
+    border-bottom: 1px solid var(--border);
+  }
+  .painel-header h3 { font-size: 15px; font-weight: 600; }
+
+  table { width: 100%; border-collapse: collapse; }
+  th, td {
+    text-align: left;
+    padding: 14px 22px;
+    font-size: 14px;
+    border-bottom: 1px solid var(--border);
+  }
+  th { color: var(--text-muted); font-weight: 500; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
+  tr:last-child td { border-bottom: none; }
+
+  .badge {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 20px;
+    font-size: 12px;
+    font-weight: 600;
+  }
+  .badge.ativo { background: rgba(47,125,79,0.12); color: var(--success); }
+  .badge.inadimplente { background: rgba(184,134,11,0.14); color: var(--warning); }
+  .badge.desligado, .badge.suspenso { background: rgba(178,58,58,0.12); color: var(--danger); }
+
+  .vazio { padding: 40px; text-align: center; color: var(--text-muted); font-size: 14px; }
+
+  .abas {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 20px;
+    border-bottom: 1px solid var(--border);
+  }
+  .aba {
+    background: none;
+    border: none;
+    padding: 10px 4px;
+    margin-right: 20px;
+    font-family: inherit;
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--text-muted);
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+  }
+  .aba.ativa { color: var(--accent); border-bottom-color: var(--accent); }
+
+  .badge.pago { background: rgba(47,125,79,0.12); color: var(--success); }
+  .badge.pendente { background: rgba(184,134,11,0.14); color: var(--warning); }
+  .badge.atrasado { background: rgba(178,58,58,0.12); color: var(--danger); }
+  .badge.cancelado { background: var(--border); color: var(--text-muted); }
+
+  select {
+    width: 100%;
+    padding: 11px 14px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--bg);
+    color: var(--text);
+    font-family: inherit;
+    font-size: 14px;
+  }
+
+  .btn-pequeno {
+    background: var(--accent-soft);
+    color: var(--accent);
+    border: none;
+    padding: 6px 12px;
+    border-radius: 8px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  .btn-pequeno:hover { background: var(--accent); color: #fff; }
+
+  /* ---------- Modal ---------- */
+  .overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.4);
+    align-items: center;
+    justify-content: center;
+    z-index: 50;
+  }
+  .modal {
+    background: var(--bg-card);
+    border-radius: 16px;
+    padding: 28px;
+    width: 90%;
+    max-width: 420px;
+    box-shadow: var(--shadow);
+  }
+  .modal h3 { margin-bottom: 18px; font-size: 17px; }
+  .modal-actions { display: flex; gap: 10px; margin-top: 20px; justify-content: flex-end; }
+
+  .toast {
+    position: fixed;
+    bottom: 24px;
+    right: 24px;
+    background: var(--accent);
+    color: #fff;
+    padding: 12px 20px;
+    border-radius: 10px;
+    font-size: 14px;
+    font-weight: 500;
+    box-shadow: var(--shadow);
+    opacity: 0;
+    transform: translateY(10px);
+    transition: all 0.25s;
+    z-index: 100;
+  }
+  .toast.show { opacity: 1; transform: translateY(0); }
+  .toast.erro { background: var(--danger); }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">Minha<span>Associação</span></div>
+  <div class="header-actions">
+    <button class="theme-toggle" id="btn-tema" title="Alternar tema">☀</button>
+    <button class="btn btn-ghost" id="btn-sair" style="display:none;">Sair</button>
+  </div>
+</header>
+
+<main>
+
+  <!-- ===== TELA DE LOGIN ===== -->
+  <div id="tela-login">
+    <h2>Entrar no painel</h2>
+    <p class="sub">Acesse com as credenciais da sua associação</p>
+
+    <div class="campo">
+      <label>ID da associação</label>
+      <input type="text" id="login-associacao" placeholder="cole o associacao_id aqui">
+    </div>
+    <div class="campo">
+      <label>E-mail</label>
+      <input type="email" id="login-email" placeholder="voce@exemplo.com">
+    </div>
+    <div class="campo">
+      <label>Senha</label>
+      <input type="password" id="login-senha" placeholder="••••••••">
+    </div>
+
+    <button class="btn" style="width:100%;" id="btn-login">Entrar</button>
+    <p id="erro-login"></p>
+  </div>
+
+  <!-- ===== DASHBOARD ===== -->
+  <div id="tela-dashboard">
+    <div class="kpis">
+      <div class="kpi-card">
+        <div class="rotulo">Total de associados</div>
+        <div class="valor" id="kpi-total">0</div>
+      </div>
+      <div class="kpi-card ativo">
+        <div class="rotulo">Ativos</div>
+        <div class="valor" id="kpi-ativos">0</div>
+      </div>
+      <div class="kpi-card inadimplente">
+        <div class="rotulo">Inadimplentes</div>
+        <div class="valor" id="kpi-inadimplentes">0</div>
+      </div>
+    </div>
+
+    <div class="abas">
+      <button class="aba ativa" id="aba-associados">Associados</button>
+      <button class="aba" id="aba-financeiro">Financeiro</button>
+    </div>
+
+    <div id="secao-associados">
+      <div class="painel">
+        <div class="painel-header">
+          <h3>Associados</h3>
+          <button class="btn" id="btn-novo-associado">+ Novo associado</button>
+        </div>
+        <div id="tabela-container">
+          <div class="vazio">Carregando...</div>
+        </div>
+      </div>
+    </div>
+
+    <div id="secao-financeiro" style="display:none;">
+      <div class="painel">
+        <div class="painel-header">
+          <h3>Cobranças</h3>
+          <button class="btn" id="btn-nova-cobranca">+ Nova cobrança</button>
+        </div>
+        <div id="tabela-cobrancas-container">
+          <div class="vazio">Carregando...</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</main>
+
+<!-- ===== MODAL NOVO ASSOCIADO ===== -->
+<div class="overlay" id="overlay-modal">
+  <div class="modal">
+    <h3>Novo associado</h3>
+    <div class="campo">
+      <label>Nome completo</label>
+      <input type="text" id="novo-nome">
+    </div>
+    <div class="campo">
+      <label>CPF</label>
+      <input type="text" id="novo-cpf" placeholder="000.000.000-00">
+    </div>
+    <div class="campo">
+      <label>Categoria (opcional)</label>
+      <input type="text" id="novo-categoria" placeholder="ex: sócio patrimonial">
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" id="btn-cancelar-modal">Cancelar</button>
+      <button class="btn" id="btn-salvar-associado">Salvar</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===== MODAL NOVA COBRANÇA ===== -->
+<div class="overlay" id="overlay-modal-cobranca">
+  <div class="modal">
+    <h3>Nova cobrança</h3>
+    <div class="campo">
+      <label>Associado</label>
+      <select id="cobranca-associado"></select>
+    </div>
+    <div class="campo">
+      <label>Descrição</label>
+      <input type="text" id="cobranca-descricao" placeholder="Mensalidade" value="Mensalidade">
+    </div>
+    <div class="campo">
+      <label>Valor (R$)</label>
+      <input type="text" id="cobranca-valor" placeholder="0,00">
+    </div>
+    <div class="campo">
+      <label>Vencimento</label>
+      <input type="date" id="cobranca-vencimento">
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" id="btn-cancelar-modal-cobranca">Cancelar</button>
+      <button class="btn" id="btn-salvar-cobranca">Salvar</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+  var API_URL = 'https://minha-associacao-backend.onrender.com';
+  var estado = { token: null, associacaoId: null };
+  var associadosCache = [];
+
+  // Converte texto tipo "150,00" ou "150.00" em número
+  function parseMoney(texto) {
+    if (!texto) return 0;
+    var limpo = texto.replace(/[^\d,.-]/g, '').replace(',', '.');
+    var partes = limpo.split('.');
+    if (partes.length > 2) {
+      limpo = partes.slice(0, -1).join('') + '.' + partes[partes.length - 1];
+    }
+    return parseFloat(limpo) || 0;
+  }
+
+  // ---------- Tema ----------
+  function aplicarTema(tema) {
+    document.documentElement.setAttribute('data-theme', tema);
+    document.getElementById('btn-tema').textContent = tema === 'dark' ? '☾' : '☀';
+    localStorage.setItem('tema-preferido', tema);
+  }
+  var temaSalvo = localStorage.getItem('tema-preferido') || 'light';
+  aplicarTema(temaSalvo);
+
+  document.getElementById('btn-tema').onclick = function() {
+    var atual = document.documentElement.getAttribute('data-theme');
+    aplicarTema(atual === 'dark' ? 'light' : 'dark');
+  };
+
+  // ---------- Toast ----------
+  function mostrarToast(mensagem, erro) {
+    var toast = document.getElementById('toast');
+    toast.textContent = mensagem;
+    toast.className = 'toast show' + (erro ? ' erro' : '');
+    setTimeout(function() { toast.className = 'toast'; }, 3000);
+  }
+
+  // ---------- Login ----------
+  document.getElementById('btn-login').onclick = function() {
+    var associacaoId = document.getElementById('login-associacao').value.trim();
+    var email = document.getElementById('login-email').value.trim();
+    var senha = document.getElementById('login-senha').value;
+    var erroEl = document.getElementById('erro-login');
+    erroEl.style.display = 'none';
+
+    if (!associacaoId || !email || !senha) {
+      erroEl.textContent = 'Preencha todos os campos.';
+      erroEl.style.display = 'block';
+      return;
+    }
+
+    fetch(API_URL + '/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: email, senha: senha, associacao_id: associacaoId })
+    })
+    .then(function(resp) { return resp.json().then(function(data) { return { ok: resp.ok, data: data }; }); })
+    .then(function(res) {
+      if (!res.ok) {
+        erroEl.textContent = res.data.erro || 'Erro ao entrar';
+        erroEl.style.display = 'block';
+        return;
+      }
+      estado.token = res.data.token;
+      estado.associacaoId = associacaoId;
+      document.getElementById('tela-login').style.display = 'none';
+      document.getElementById('tela-dashboard').style.display = 'block';
+      document.getElementById('btn-sair').style.display = 'inline-block';
+      carregarAssociados();
+      carregarCobrancas();
+    })
+    .catch(function() {
+      erroEl.textContent = 'Não foi possível conectar ao servidor. Verifique se o backend está rodando.';
+      erroEl.style.display = 'block';
+    });
+  };
+
+  document.getElementById('btn-sair').onclick = function() {
+    estado.token = null;
+    estado.associacaoId = null;
+    document.getElementById('tela-dashboard').style.display = 'none';
+    document.getElementById('tela-login').style.display = 'block';
+    document.getElementById('btn-sair').style.display = 'none';
+  };
+
+  // ---------- Carregar associados ----------
+  function carregarAssociados() {
+    fetch(API_URL + '/associados', {
+      headers: { 'Authorization': 'Bearer ' + estado.token }
+    })
+    .then(function(resp) { return resp.json(); })
+    .then(function(lista) { renderizarTabela(lista); })
+    .catch(function() { mostrarToast('Erro ao carregar associados', true); });
+  }
+
+  function renderizarTabela(lista) {
+    associadosCache = lista;
+    var container = document.getElementById('tabela-container');
+
+    document.getElementById('kpi-total').textContent = lista.length;
+    document.getElementById('kpi-ativos').textContent = lista.filter(function(a) { return a.status === 'ativo'; }).length;
+    document.getElementById('kpi-inadimplentes').textContent = lista.filter(function(a) { return a.status === 'inadimplente'; }).length;
+
+    if (lista.length === 0) {
+      container.innerHTML = '<div class="vazio">Nenhum associado cadastrado ainda.</div>';
+      return;
+    }
+
+    var html = '<table><thead><tr><th>Nome</th><th>CPF</th><th>Categoria</th><th>Status</th><th>Ingresso</th></tr></thead><tbody>';
+    lista.forEach(function(a) {
+      html += '<tr>' +
+        '<td>' + escapeHtml(a.nome_completo) + '</td>' +
+        '<td>' + escapeHtml(a.cpf || '—') + '</td>' +
+        '<td>' + escapeHtml(a.categoria || '—') + '</td>' +
+        '<td><span class="badge ' + a.status + '">' + a.status + '</span></td>' +
+        '<td>' + formatarData(a.data_ingresso) + '</td>' +
+        '</tr>';
+    });
+    html += '</tbody></table>';
+    container.innerHTML = html;
+  }
+
+  function escapeHtml(texto) {
+    var div = document.createElement('div');
+    div.textContent = texto;
+    return div.innerHTML;
+  }
+
+  function formatarData(iso) {
+    if (!iso) return '—';
+    var partes = iso.substring(0, 10).split('-');
+    return partes[2] + '/' + partes[1] + '/' + partes[0];
+  }
+
+  // ---------- Modal novo associado ----------
+  document.getElementById('btn-novo-associado').onclick = function() {
+    document.getElementById('overlay-modal').style.display = 'flex';
+  };
+  document.getElementById('btn-cancelar-modal').onclick = function() {
+    document.getElementById('overlay-modal').style.display = 'none';
+  };
+
+  document.getElementById('btn-salvar-associado').onclick = function() {
+    var nome = document.getElementById('novo-nome').value.trim();
+    var cpf = document.getElementById('novo-cpf').value.trim();
+    var categoria = document.getElementById('novo-categoria').value.trim();
+
+    if (!nome) {
+      mostrarToast('Informe o nome completo', true);
+      return;
+    }
+
+    fetch(API_URL + '/associados', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + estado.token
+      },
+      body: JSON.stringify({ nome_completo: nome, cpf: cpf, categoria: categoria })
+    })
+    .then(function(resp) { return resp.json().then(function(data) { return { ok: resp.ok, data: data }; }); })
+    .then(function(res) {
+      if (!res.ok) {
+        mostrarToast(res.data.erro || 'Erro ao salvar', true);
+        return;
+      }
+      document.getElementById('overlay-modal').style.display = 'none';
+      document.getElementById('novo-nome').value = '';
+      document.getElementById('novo-cpf').value = '';
+      document.getElementById('novo-categoria').value = '';
+      mostrarToast('Associado cadastrado com sucesso!');
+      carregarAssociados();
+    })
+    .catch(function() { mostrarToast('Erro ao conectar ao servidor', true); });
+  };
+
+  // ---------- Abas ----------
+  document.getElementById('aba-associados').onclick = function() {
+    document.getElementById('aba-associados').className = 'aba ativa';
+    document.getElementById('aba-financeiro').className = 'aba';
+    document.getElementById('secao-associados').style.display = 'block';
+    document.getElementById('secao-financeiro').style.display = 'none';
+  };
+  document.getElementById('aba-financeiro').onclick = function() {
+    document.getElementById('aba-financeiro').className = 'aba ativa';
+    document.getElementById('aba-associados').className = 'aba';
+    document.getElementById('secao-financeiro').style.display = 'block';
+    document.getElementById('secao-associados').style.display = 'none';
+    carregarCobrancas();
+  };
+
+  // ---------- Financeiro: carregar cobranças ----------
+  function carregarCobrancas() {
+    fetch(API_URL + '/cobrancas', {
+      headers: { 'Authorization': 'Bearer ' + estado.token }
+    })
+    .then(function(resp) { return resp.json(); })
+    .then(function(lista) { renderizarCobrancas(lista); })
+    .catch(function() { mostrarToast('Erro ao carregar cobranças', true); });
+  }
+
+  function renderizarCobrancas(lista) {
+    var container = document.getElementById('tabela-cobrancas-container');
+
+    if (lista.length === 0) {
+      container.innerHTML = '<div class="vazio">Nenhuma cobrança cadastrada ainda.</div>';
+      return;
+    }
+
+    var html = '<table><thead><tr><th>Associado</th><th>Descrição</th><th>Valor</th><th>Vencimento</th><th>Status</th><th></th></tr></thead><tbody>';
+    lista.forEach(function(c) {
+      var statusExibicao = c.status_exibicao || c.status;
+      var valorFormatado = 'R$ ' + parseFloat(c.valor).toFixed(2).replace('.', ',');
+      html += '<tr>' +
+        '<td>' + escapeHtml(c.associado_nome) + '</td>' +
+        '<td>' + escapeHtml(c.descricao) + '</td>' +
+        '<td>' + valorFormatado + '</td>' +
+        '<td>' + formatarData(c.vencimento) + '</td>' +
+        '<td><span class="badge ' + statusExibicao + '">' + statusExibicao + '</span></td>' +
+        '<td>' + (c.status === 'pago' ? '' : '<button class="btn-pequeno" data-id="' + c.id + '" onclick="marcarComoPago(\'' + c.id + '\')">Marcar como pago</button>') + '</td>' +
+        '</tr>';
+    });
+    html += '</tbody></table>';
+    container.innerHTML = html;
+  }
+
+  function marcarComoPago(id) {
+    fetch(API_URL + '/cobrancas/' + id + '/pagar', {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + estado.token
+      },
+      body: JSON.stringify({ metodo: 'pix' })
+    })
+    .then(function(resp) { return resp.json().then(function(data) { return { ok: resp.ok, data: data }; }); })
+    .then(function(res) {
+      if (!res.ok) {
+        mostrarToast(res.data.erro || 'Erro ao registrar pagamento', true);
+        return;
+      }
+      mostrarToast('Pagamento registrado!');
+      carregarCobrancas();
+    })
+    .catch(function() { mostrarToast('Erro ao conectar ao servidor', true); });
+  }
+
+  // ---------- Modal nova cobrança ----------
+  document.getElementById('btn-nova-cobranca').onclick = function() {
+    var select = document.getElementById('cobranca-associado');
+    select.innerHTML = associadosCache.map(function(a) {
+      return '<option value="' + a.id + '">' + escapeHtml(a.nome_completo) + '</option>';
+    }).join('');
+    if (associadosCache.length === 0) {
+      mostrarToast('Cadastre um associado antes de gerar cobrança', true);
+      return;
+    }
+    document.getElementById('overlay-modal-cobranca').style.display = 'flex';
+  };
+  document.getElementById('btn-cancelar-modal-cobranca').onclick = function() {
+    document.getElementById('overlay-modal-cobranca').style.display = 'none';
+  };
+
+  document.getElementById('btn-salvar-cobranca').onclick = function() {
+    var associadoId = document.getElementById('cobranca-associado').value;
+    var descricao = document.getElementById('cobranca-descricao').value.trim() || 'Mensalidade';
+    var valor = parseMoney(document.getElementById('cobranca-valor').value);
+    var vencimento = document.getElementById('cobranca-vencimento').value;
+
+    if (!associadoId || !vencimento || valor <= 0) {
+      mostrarToast('Preencha associado, valor e vencimento corretamente', true);
+      return;
+    }
+
+    fetch(API_URL + '/cobrancas', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + estado.token
+      },
+      body: JSON.stringify({ associado_id: associadoId, descricao: descricao, valor: valor, vencimento: vencimento })
+    })
+    .then(function(resp) { return resp.json().then(function(data) { return { ok: resp.ok, data: data }; }); })
+    .then(function(res) {
+      if (!res.ok) {
+        mostrarToast(res.data.erro || 'Erro ao criar cobrança', true);
+        return;
+      }
+      document.getElementById('overlay-modal-cobranca').style.display = 'none';
+      document.getElementById('cobranca-valor').value = '';
+      mostrarToast('Cobrança criada com sucesso!');
+      carregarCobrancas();
+    })
+    .catch(function() { mostrarToast('Erro ao conectar ao servidor', true); });
+  };
+</script>
+
+</body>
+</html>
