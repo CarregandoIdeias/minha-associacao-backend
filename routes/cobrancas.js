@@ -126,6 +126,44 @@ router.patch('/:id/pagar', autorizar('admin', 'diretoria'), async (req, res) => 
     }
 });
 
+// PATCH /cobrancas/:id/estornar — reverte um pagamento marcado por engano (só admin)
+router.patch('/:id/estornar', autorizar('admin'), async (req, res) => {
+    const { id } = req.params;
+
+    const client = await comConexaoTenant(req.usuario.associacao_id);
+    try {
+        await client.query('BEGIN');
+
+        const cobranca = await client.query(`SELECT id, status FROM cobrancas WHERE id = $1`, [id]);
+        if (cobranca.rows.length === 0) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ erro: 'Cobrança não encontrada' });
+        }
+        if (cobranca.rows[0].status !== 'pago') {
+            await client.query('ROLLBACK');
+            return res.status(409).json({ erro: 'Só é possível estornar uma cobrança que está paga' });
+        }
+
+        await client.query(`DELETE FROM pagamentos WHERE cobranca_id = $1`, [id]);
+
+        await client.query(
+            `UPDATE cobrancas
+             SET status = 'pendente', metodo = NULL, comprovante_base64 = NULL, comprovante_enviado_em = NULL
+             WHERE id = $1`,
+            [id]
+        );
+
+        await client.query('COMMIT');
+        res.json({ ok: true, id, status: 'pendente' });
+    } catch (err) {
+        await client.query('ROLLBACK');
+        console.error(err);
+        res.status(500).json({ erro: 'Erro ao estornar pagamento' });
+    } finally {
+        client.release();
+    }
+});
+
 // GET /cobrancas/:id/comprovante — retorna o comprovante enviado pelo associado (admin/diretoria)
 router.get('/:id/comprovante', autorizar('admin', 'diretoria'), async (req, res) => {
     const { id } = req.params;
