@@ -14,7 +14,7 @@ router.get('/', autorizar('admin', 'diretoria'), async (req, res) => {
     const client = await comConexaoTenant(req.usuario.associacao_id);
     try {
         const resultado = await client.query(
-            `SELECT id, nome_completo, cpf, telefone, categoria, status, data_ingresso
+            `SELECT id, nome_completo, cpf, telefone, categoria, status, data_ingresso, observacao
              FROM associados
              ORDER BY nome_completo`
         );
@@ -29,7 +29,7 @@ router.get('/', autorizar('admin', 'diretoria'), async (req, res) => {
 
 // POST /associados — cria um novo associado (só admin/diretoria)
 router.post('/', autorizar('admin', 'diretoria'), async (req, res) => {
-    const { nome_completo, cpf, telefone, categoria } = req.body;
+    const { nome_completo, cpf, telefone, categoria, observacao } = req.body;
 
     if (!nome_completo || !nome_completo.trim()) {
         return res.status(400).json({ erro: 'nome_completo é obrigatório' });
@@ -41,10 +41,10 @@ router.post('/', autorizar('admin', 'diretoria'), async (req, res) => {
     const client = await comConexaoTenant(req.usuario.associacao_id);
     try {
         const resultado = await client.query(
-            `INSERT INTO associados (associacao_id, nome_completo, cpf, telefone, categoria)
-             VALUES ($1, $2, $3, $4, $5)
-             RETURNING id, nome_completo, cpf, telefone, categoria, status, data_ingresso`,
-            [req.usuario.associacao_id, nome_completo.trim(), cpf || null, telefone || null, categoria || null]
+            `INSERT INTO associados (associacao_id, nome_completo, cpf, telefone, categoria, observacao)
+             VALUES ($1, $2, $3, $4, $5, $6)
+             RETURNING id, nome_completo, cpf, telefone, categoria, status, data_ingresso, observacao`,
+            [req.usuario.associacao_id, nome_completo.trim(), cpf || null, telefone || null, categoria || null, observacao || null]
         );
         res.status(201).json(resultado.rows[0]);
     } catch (err) {
@@ -61,7 +61,7 @@ router.post('/', autorizar('admin', 'diretoria'), async (req, res) => {
 // PUT /associados/:id — edita um associado existente (só admin/diretoria)
 router.put('/:id', autorizar('admin', 'diretoria'), async (req, res) => {
     const { id } = req.params;
-    const { nome_completo, cpf, telefone, categoria, status } = req.body;
+    const { nome_completo, cpf, telefone, categoria, status, observacao } = req.body;
 
     if (!nome_completo || !nome_completo.trim()) {
         return res.status(400).json({ erro: 'nome_completo é obrigatório' });
@@ -79,10 +79,10 @@ router.put('/:id', autorizar('admin', 'diretoria'), async (req, res) => {
         const resultado = await client.query(
             `UPDATE associados
              SET nome_completo = $1, cpf = $2, telefone = $3, categoria = $4,
-                 status = COALESCE($5, status)
-             WHERE id = $6
-             RETURNING id, nome_completo, cpf, telefone, categoria, status, data_ingresso`,
-            [nome_completo.trim(), cpf || null, telefone || null, categoria || null, status || null, id]
+                 status = COALESCE($5, status), observacao = $6
+             WHERE id = $7
+             RETURNING id, nome_completo, cpf, telefone, categoria, status, data_ingresso, observacao`,
+            [nome_completo.trim(), cpf || null, telefone || null, categoria || null, status || null, observacao || null, id]
         );
 
         if (resultado.rows.length === 0) {
