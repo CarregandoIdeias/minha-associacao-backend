@@ -35,13 +35,30 @@ router.get('/', autorizar('admin', 'diretoria'), async (req, res) => {
             valores
         );
 
-        // Marca automaticamente como "atrasado" (somente na resposta) se venceu e ainda está pendente
-        const hoje = new Date().toISOString().substring(0, 10);
+        const configAssociacao = await client.query(
+            `SELECT dias_alerta_vencimento FROM associacoes WHERE id = $1`,
+            [req.usuario.associacao_id]
+        );
+        const diasAlerta = configAssociacao.rows[0] ? configAssociacao.rows[0].dias_alerta_vencimento : 3;
+
+        // Marca automaticamente como "atrasado" ou "vencendo_em_breve" (somente na resposta)
+        const hoje = new Date();
+        hoje.setHours(0, 0, 0, 0);
         const linhas = resultado.rows.map((linha) => {
-            if (linha.status === 'pendente' && linha.vencimento.toISOString().substring(0, 10) < hoje) {
-                return { ...linha, status_exibicao: 'atrasado' };
+            if (linha.status !== 'pendente') {
+                return { ...linha, status_exibicao: linha.status, dias_restantes: null };
             }
-            return { ...linha, status_exibicao: linha.status };
+            const vencimento = new Date(linha.vencimento);
+            vencimento.setHours(0, 0, 0, 0);
+            const diasRestantes = Math.round((vencimento - hoje) / (1000 * 60 * 60 * 24));
+
+            if (diasRestantes < 0) {
+                return { ...linha, status_exibicao: 'atrasado', dias_restantes: diasRestantes };
+            }
+            if (diasRestantes <= diasAlerta) {
+                return { ...linha, status_exibicao: 'vencendo_em_breve', dias_restantes: diasRestantes };
+            }
+            return { ...linha, status_exibicao: 'pendente', dias_restantes: diasRestantes };
         });
 
         res.json(linhas);

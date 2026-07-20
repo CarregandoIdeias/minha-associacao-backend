@@ -51,4 +51,45 @@ router.put('/pix', autorizar('admin'), async (req, res) => {
     }
 });
 
+// GET /configuracoes/alertas — qualquer usuário autenticado pode ler
+router.get('/alertas', async (req, res) => {
+    const client = await comConexaoTenant(req.usuario.associacao_id);
+    try {
+        const resultado = await client.query(
+            `SELECT dias_alerta_vencimento FROM associacoes WHERE id = $1`,
+            [req.usuario.associacao_id]
+        );
+        res.json(resultado.rows[0] || { dias_alerta_vencimento: 3 });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ erro: 'Erro ao buscar configuração de alertas' });
+    } finally {
+        client.release();
+    }
+});
+
+// PUT /configuracoes/alertas — só admin configura
+router.put('/alertas', autorizar('admin'), async (req, res) => {
+    const { dias_alerta_vencimento } = req.body;
+    const dias = parseInt(dias_alerta_vencimento, 10);
+
+    if (isNaN(dias) || dias < 0 || dias > 30) {
+        return res.status(400).json({ erro: 'dias_alerta_vencimento deve ser um número entre 0 e 30' });
+    }
+
+    const client = await comConexaoTenant(req.usuario.associacao_id);
+    try {
+        await client.query(
+            `UPDATE associacoes SET dias_alerta_vencimento = $1 WHERE id = $2`,
+            [dias, req.usuario.associacao_id]
+        );
+        res.json({ ok: true });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ erro: 'Erro ao salvar configuração de alertas' });
+    } finally {
+        client.release();
+    }
+});
+
 module.exports = router;
