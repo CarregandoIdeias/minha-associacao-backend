@@ -9,53 +9,8 @@ const { emailValido } = require('../utils/validacao');
 const router = express.Router();
 const JWT_SECRET = process.env.JWT_SECRET || 'troque-isso-em-producao';
 
-// POST /auth/registrar-associacao
-// Cria a associação (tenant) + o primeiro usuário admin dela
-router.post('/registrar-associacao', async (req, res) => {
-    const { nome_associacao, tipo, nome_admin, email, senha } = req.body;
-
-    if (!nome_associacao || !nome_admin || !email || !senha) {
-        return res.status(400).json({ erro: 'Campos obrigatórios faltando' });
-    }
-    if (!emailValido(email)) {
-        return res.status(400).json({ erro: 'e-mail inválido' });
-    }
-
-    const client = await pool.connect();
-    try {
-        await client.query('BEGIN');
-
-        const associacao = await client.query(
-            `INSERT INTO associacoes (nome, tipo) VALUES ($1, $2) RETURNING id`,
-            [nome_associacao, tipo || 'outra']
-        );
-        const associacaoId = associacao.rows[0].id;
-
-        const senhaHash = await bcrypt.hash(senha, 10);
-
-        const usuario = await client.query(
-            `INSERT INTO usuarios (associacao_id, nome, email, senha_hash, papel)
-             VALUES ($1, $2, $3, $4, 'admin') RETURNING id, nome, email, papel`,
-            [associacaoId, nome_admin, email, senhaHash]
-        );
-
-        await client.query('COMMIT');
-
-        res.status(201).json({
-            associacao_id: associacaoId,
-            usuario: usuario.rows[0],
-        });
-    } catch (err) {
-        await client.query('ROLLBACK');
-        if (err.code === '23505') {
-            return res.status(409).json({ erro: 'E-mail já cadastrado nessa associação' });
-        }
-        console.error(err);
-        res.status(500).json({ erro: 'Erro ao registrar associação' });
-    } finally {
-        client.release();
-    }
-});
+// POST /auth/registrar-associacao foi REMOVIDA — a partir de agora, só o
+// super-admin cria novas associações (ver routes/superadmin.js).
 
 // POST /auth/login
 router.post('/login', async (req, res) => {

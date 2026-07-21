@@ -47,4 +47,25 @@ async function comConexaoTenant(associacaoId) {
     return client; // lembrar de chamar client.release() depois de usar
 }
 
-module.exports = { autenticar, autorizar, comConexaoTenant };
+// Verifica o token de SUPER-ADMIN (separado do login das associações)
+function autenticarSuperAdmin(req, res, next) {
+    const header = req.headers.authorization;
+    if (!header || !header.startsWith('Bearer ')) {
+        return res.status(401).json({ erro: 'Token não fornecido' });
+    }
+
+    const token = header.split(' ')[1];
+
+    try {
+        const payload = jwt.verify(token, JWT_SECRET);
+        if (payload.tipo !== 'superadmin') {
+            return res.status(403).json({ erro: 'Acesso restrito ao super-admin' });
+        }
+        req.superAdmin = payload; // { id, email, tipo }
+        next();
+    } catch (err) {
+        return res.status(401).json({ erro: 'Token inválido ou expirado' });
+    }
+}
+
+module.exports = { autenticar, autorizar, comConexaoTenant, autenticarSuperAdmin };
