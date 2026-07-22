@@ -4,10 +4,11 @@
 // ex: postgres://usuario:senha@host:5432/banco
 
 const { Pool } = require('pg');
+const env = require('./config/env');
 
 const pool = new Pool({
-    connectionString: process.env.DATABASE_URL,
-    ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+    connectionString: env.databaseUrl,
+    ssl: env.isProduction ? { rejectUnauthorized: false } : false,
 });
 
 module.exports = pool;

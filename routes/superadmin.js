@@ -3,11 +3,12 @@ const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const pool = require('../db');
+const env = require('../config/env');
 const { autenticarSuperAdmin } = require('../middleware/auth');
 const { emailValido } = require('../utils/validacao');
 
 const router = express.Router();
-const JWT_SECRET = process.env.JWT_SECRET || 'troque-isso-em-producao';
+const JWT_SECRET = env.jwtSecret;
 
 // POST /superadmin/bootstrap
 // Cria o PRIMEIRO super-admin. Só funciona se ainda não existir nenhum

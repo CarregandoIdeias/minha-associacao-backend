@@ -1,8 +1,9 @@
 // middleware/auth.js
 const jwt = require('jsonwebtoken');
 const pool = require('../db');
+const env = require('../config/env');
 
-const JWT_SECRET = process.env.JWT_SECRET || 'troque-isso-em-producao';
+const JWT_SECRET = env.jwtSecret;
 
 // Verifica o token e disponibiliza os dados do usuário em req.usuario
 function autenticar(req, res, next) {

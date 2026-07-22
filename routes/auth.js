@@ -4,10 +4,11 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const pool = require('../db');
+const env = require('../config/env');
 const { emailValido } = require('../utils/validacao');
 
 const router = express.Router();
-const JWT_SECRET = process.env.JWT_SECRET || 'troque-isso-em-producao';
+const JWT_SECRET = env.jwtSecret;
 
 // POST /auth/registrar-associacao foi REMOVIDA — a partir de agora, só o
 // super-admin cria novas associações (ver routes/superadmin.js).
