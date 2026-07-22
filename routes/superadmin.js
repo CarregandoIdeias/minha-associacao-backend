@@ -104,16 +104,37 @@ router.get('/associacoes', async (req, res) => {
 // GET /superadmin/dashboard — KPIs agregados de toda a plataforma
 router.get('/dashboard', async (req, res) => {
     try {
-        const resultado = await pool.query(`
+        const kpis = await pool.query(`
             SELECT
                 (SELECT COUNT(*) FROM associacoes) AS total_associacoes,
                 (SELECT COUNT(*) FROM associacoes WHERE ativo = true) AS associacoes_ativas,
+                (SELECT COUNT(*) FROM associacoes WHERE ativo = false) AS associacoes_bloqueadas,
                 (SELECT COUNT(*) FROM associados) AS total_associados,
                 (SELECT COUNT(*) FROM cobrancas WHERE status = 'pendente') AS total_pendentes,
                 (SELECT COUNT(*) FROM cobrancas WHERE status = 'pendente' AND vencimento < CURRENT_DATE) AS total_atrasadas,
-                (SELECT COUNT(*) FROM cobrancas WHERE status = 'aguardando_confirmacao') AS total_aguardando_confirmacao
+                (SELECT COUNT(*) FROM cobrancas WHERE status = 'aguardando_confirmacao') AS total_aguardando_confirmacao,
+                (SELECT COALESCE(SUM(p.valor_pago), 0) FROM pagamentos p WHERE p.pago_em >= date_trunc('month', now())) AS receita_mensal
         `);
-        res.json(resultado.rows[0]);
+
+        const crescimentoAssociacoes = await pool.query(`
+            SELECT to_char(mes, 'YYYY-MM') AS mes, COUNT(a.id) AS total
+            FROM generate_series(date_trunc('month', now()) - interval '6 months', date_trunc('month', now()), interval '1 month') AS mes
+            LEFT JOIN associacoes a ON date_trunc('month', a.criado_em) = mes
+            GROUP BY mes ORDER BY mes
+        `);
+
+        const novosAssociados = await pool.query(`
+            SELECT to_char(mes, 'YYYY-MM') AS mes, COUNT(ass.id) AS total
+            FROM generate_series(date_trunc('month', now()) - interval '6 months', date_trunc('month', now()), interval '1 month') AS mes
+            LEFT JOIN associados ass ON date_trunc('month', ass.criado_em) = mes
+            GROUP BY mes ORDER BY mes
+        `);
+
+        res.json({
+            ...kpis.rows[0],
+            crescimento_associacoes: crescimentoAssociacoes.rows,
+            novos_associados: novosAssociados.rows
+        });
     } catch (err) {
         console.error(err);
         res.status(500).json({ erro: 'Erro ao buscar dashboard' });
