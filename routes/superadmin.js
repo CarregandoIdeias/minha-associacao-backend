@@ -3,12 +3,11 @@ const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const pool = require('../db');
-const env = require('../config/env');
 const { autenticarSuperAdmin } = require('../middleware/auth');
 const { emailValido } = require('../utils/validacao');
 
 const router = express.Router();
-const JWT_SECRET = env.jwtSecret;
+const JWT_SECRET = process.env.JWT_SECRET || 'troque-isso-em-producao';
 
 // POST /superadmin/bootstrap
 // Cria o PRIMEIRO super-admin. Só funciona se ainda não existir nenhum
@@ -83,22 +82,137 @@ router.post('/login', async (req, res) => {
 // A partir daqui, todas as rotas exigem token de super-admin
 router.use(autenticarSuperAdmin);
 
-// GET /superadmin/associacoes — lista todas as associações com contadores agregados
+// GET /superadmin/associacoes — lista todas as associações com contadores agregados e filtros
 router.get('/associacoes', async (req, res) => {
+    const { busca, cidade, plano, status } = req.query;
     try {
+        const condicoes = [];
+        const valores = [];
+
+        if (busca) {
+            valores.push('%' + busca + '%');
+            condicoes.push(`a.nome ILIKE $${valores.length}`);
+        }
+        if (cidade) {
+            valores.push('%' + cidade + '%');
+            condicoes.push(`a.cidade ILIKE $${valores.length}`);
+        }
+        if (plano) {
+            valores.push(plano);
+            condicoes.push(`a.plano = $${valores.length}`);
+        }
+        if (status === 'ativo') condicoes.push(`a.ativo = true`);
+        if (status === 'inativo') condicoes.push(`a.ativo = false`);
+
+        const where = condicoes.length ? `WHERE ${condicoes.join(' AND ')}` : '';
+
         const resultado = await pool.query(`
-            SELECT a.id, a.nome, a.tipo, a.email, a.telefone, a.endereco, a.cnpj,
+            SELECT a.id, a.nome, a.tipo, a.email, a.telefone, a.endereco, a.cidade, a.estado, a.cnpj,
                    a.plano, a.ativo, a.criado_em,
                    (SELECT COUNT(*) FROM associados ass WHERE ass.associacao_id = a.id) AS total_associados,
                    (SELECT COUNT(*) FROM cobrancas c WHERE c.associacao_id = a.id AND c.status = 'pendente') AS cobrancas_pendentes,
                    (SELECT COUNT(*) FROM cobrancas c WHERE c.associacao_id = a.id AND c.status = 'pendente' AND c.vencimento < CURRENT_DATE) AS cobrancas_atrasadas
             FROM associacoes a
+            ${where}
             ORDER BY a.criado_em DESC
-        `);
+        `, valores);
         res.json(resultado.rows);
     } catch (err) {
         console.error(err);
         res.status(500).json({ erro: 'Erro ao listar associações' });
+    }
+});
+
+// GET /superadmin/associacoes/:id — detalhe completo de uma associação
+router.get('/associacoes/:id', async (req, res) => {
+    const { id } = req.params;
+    try {
+        const associacao = await pool.query(`SELECT * FROM associacoes WHERE id = $1`, [id]);
+        if (associacao.rows.length === 0) {
+            return res.status(404).json({ erro: 'Associação não encontrada' });
+        }
+
+        const admin = await pool.query(
+            `SELECT id, nome, email, ativo, criado_em FROM usuarios WHERE associacao_id = $1 AND papel = 'admin' LIMIT 1`,
+            [id]
+        );
+
+        const financeiro = await pool.query(`
+            SELECT
+                (SELECT COALESCE(SUM(p.valor_pago), 0) FROM pagamentos p
+                   JOIN cobrancas c ON c.id = p.cobranca_id WHERE c.associacao_id = $1) AS total_recebido,
+                (SELECT COALESCE(SUM(valor), 0) FROM cobrancas WHERE associacao_id = $1 AND status = 'pendente') AS total_a_receber,
+                (SELECT MIN(vencimento) FROM cobrancas WHERE associacao_id = $1 AND status = 'pendente') AS proximo_vencimento
+        `, [id]);
+
+        res.json({
+            ...associacao.rows[0],
+            admin: admin.rows[0] || null,
+            financeiro: financeiro.rows[0]
+        });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ erro: 'Erro ao buscar detalhes da associação' });
+    }
+});
+
+// GET /superadmin/associacoes/:id/associados — lista só-leitura dos associados dessa associação
+router.get('/associacoes/:id/associados', async (req, res) => {
+    const { id } = req.params;
+    try {
+        const resultado = await pool.query(
+            `SELECT id, nome_completo, cpf, telefone, categoria, status, data_ingresso
+             FROM associados WHERE associacao_id = $1 ORDER BY nome_completo`,
+            [id]
+        );
+        res.json(resultado.rows);
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ erro: 'Erro ao listar associados' });
+    }
+});
+
+// GET /superadmin/associacoes/:id/cobrancas — lista só-leitura das cobranças dessa associação
+router.get('/associacoes/:id/cobrancas', async (req, res) => {
+    const { id } = req.params;
+    try {
+        const resultado = await pool.query(
+            `SELECT c.id, c.descricao, c.valor, c.vencimento, c.status, a.nome_completo AS associado_nome
+             FROM cobrancas c JOIN associados a ON a.id = c.associado_id
+             WHERE c.associacao_id = $1 ORDER BY c.vencimento DESC LIMIT 200`,
+            [id]
+        );
+        res.json(resultado.rows);
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ erro: 'Erro ao listar cobranças' });
+    }
+});
+
+// PATCH /superadmin/associacoes/:id/resetar-senha-admin — gera uma nova senha para o admin da associação
+router.patch('/associacoes/:id/resetar-senha-admin', async (req, res) => {
+    const { id } = req.params;
+    const { nova_senha } = req.body;
+
+    if (!nova_senha || nova_senha.length < 6) {
+        return res.status(400).json({ erro: 'nova_senha deve ter ao menos 6 caracteres' });
+    }
+
+    try {
+        const senhaHash = await bcrypt.hash(nova_senha, 10);
+        const resultado = await pool.query(
+            `UPDATE usuarios SET senha_hash = $1
+             WHERE associacao_id = $2 AND papel = 'admin'
+             RETURNING id, email`,
+            [senhaHash, id]
+        );
+        if (resultado.rows.length === 0) {
+            return res.status(404).json({ erro: 'Admin dessa associação não encontrado' });
+        }
+        res.json({ ok: true, email: resultado.rows[0].email });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ erro: 'Erro ao redefinir senha' });
     }
 });
 
@@ -145,7 +259,7 @@ router.get('/dashboard', async (req, res) => {
 // POST /superadmin/associacoes — cria uma nova associação + admin inicial dela
 router.post('/associacoes', async (req, res) => {
     const {
-        nome_associacao, tipo, email, telefone, endereco, cnpj,
+        nome_associacao, tipo, email, telefone, endereco, cidade, estado, cnpj,
         nome_admin, email_admin, senha_admin
     } = req.body;
 
@@ -164,9 +278,9 @@ router.post('/associacoes', async (req, res) => {
         await client.query('BEGIN');
 
         const associacao = await client.query(
-            `INSERT INTO associacoes (nome, tipo, email, telefone, endereco, cnpj)
-             VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
-            [nome_associacao, tipo || 'outra', email || null, telefone || null, endereco || null, cnpj || null]
+            `INSERT INTO associacoes (nome, tipo, email, telefone, endereco, cidade, estado, cnpj)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
+            [nome_associacao, tipo || 'outra', email || null, telefone || null, endereco || null, cidade || null, estado || null, cnpj || null]
         );
         const associacaoId = associacao.rows[0].id;
 
@@ -195,7 +309,7 @@ router.post('/associacoes', async (req, res) => {
 // PUT /superadmin/associacoes/:id — edita os dados de uma associação
 router.put('/associacoes/:id', async (req, res) => {
     const { id } = req.params;
-    const { nome, tipo, email, telefone, endereco, cnpj, ativo } = req.body;
+    const { nome, tipo, email, telefone, endereco, cidade, estado, cnpj, ativo } = req.body;
 
     if (!nome || !nome.trim()) {
         return res.status(400).json({ erro: 'nome é obrigatório' });
@@ -205,10 +319,10 @@ router.put('/associacoes/:id', async (req, res) => {
         const resultado = await pool.query(
             `UPDATE associacoes
              SET nome = $1, tipo = COALESCE($2, tipo), email = $3, telefone = $4,
-                 endereco = $5, cnpj = $6, ativo = COALESCE($7, ativo)
-             WHERE id = $8
-             RETURNING id, nome, tipo, email, telefone, endereco, cnpj, ativo`,
-            [nome.trim(), tipo || null, email || null, telefone || null, endereco || null, cnpj || null, ativo, id]
+                 endereco = $5, cidade = $6, estado = $7, cnpj = $8, ativo = COALESCE($9, ativo)
+             WHERE id = $10
+             RETURNING id, nome, tipo, email, telefone, endereco, cidade, estado, cnpj, ativo`,
+            [nome.trim(), tipo || null, email || null, telefone || null, endereco || null, cidade || null, estado || null, cnpj || null, ativo, id]
         );
         if (resultado.rows.length === 0) {
             return res.status(404).json({ erro: 'Associação não encontrada' });
