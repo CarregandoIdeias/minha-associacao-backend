@@ -1,6 +1,7 @@
 // routes/usuarios.js
 const express = require('express');
 const bcrypt = require('bcryptjs');
+const crypto = require('crypto');
 const { autenticar, autorizar, comConexaoTenant } = require('../middleware/auth');
 const { emailValido } = require('../utils/validacao');
 
@@ -14,7 +15,9 @@ router.get('/', autorizar('admin'), async (req, res) => {
         const resultado = await client.query(
             `SELECT id, nome, email, papel, ativo, criado_em
              FROM usuarios
-             ORDER BY criado_em`
+             WHERE associacao_id = $1
+             ORDER BY criado_em`,
+            [req.usuario.associacao_id]
         );
         res.json(resultado.rows);
     } catch (err) {
@@ -61,8 +64,8 @@ router.post('/', autorizar('admin'), async (req, res) => {
 
         if (papel === 'associado') {
             const vinculo = await client.query(
-                `UPDATE associados SET usuario_id = $1 WHERE id = $2 AND usuario_id IS NULL RETURNING id`,
-                [novoUsuario.id, associado_id]
+                `UPDATE associados SET usuario_id = $1 WHERE id = $2 AND usuario_id IS NULL AND associacao_id = $3 RETURNING id`,
+                [novoUsuario.id, associado_id, req.usuario.associacao_id]
             );
             if (vinculo.rows.length === 0) {
                 await client.query('ROLLBACK');
@@ -89,12 +92,46 @@ router.get('/associados-sem-login', autorizar('admin'), async (req, res) => {
     const client = await comConexaoTenant(req.usuario.associacao_id);
     try {
         const resultado = await client.query(
-            `SELECT id, nome_completo FROM associados WHERE usuario_id IS NULL ORDER BY nome_completo`
+            `SELECT id, nome_completo FROM associados WHERE usuario_id IS NULL AND associacao_id = $1 ORDER BY nome_completo`,
+            [req.usuario.associacao_id]
         );
         res.json(resultado.rows);
     } catch (err) {
         console.error(err);
         res.status(500).json({ erro: 'Erro ao listar associados sem login' });
+    } finally {
+        client.release();
+    }
+});
+
+// POST /usuarios/:id/gerar-link-redefinicao — admin gera um link de redefinição
+// de senha para outro usuário da mesma associação (correção da vulnerabilidade
+// que permitia qualquer pessoa gerar esse link só com e-mail + associacao_id)
+router.post('/:id/gerar-link-redefinicao', autorizar('admin'), async (req, res) => {
+    const { id } = req.params;
+    const client = await comConexaoTenant(req.usuario.associacao_id);
+    try {
+        const usuario = await client.query(
+            `SELECT id FROM usuarios WHERE id = $1 AND associacao_id = $2`,
+            [id, req.usuario.associacao_id]
+        );
+        if (usuario.rows.length === 0) {
+            return res.status(404).json({ erro: 'Usuário não encontrado' });
+        }
+
+        const tokenBruto = crypto.randomBytes(32).toString('hex');
+        const tokenHash = crypto.createHash('sha256').update(tokenBruto).digest('hex');
+        const expiraEm = new Date(Date.now() + 60 * 60 * 1000); // 1 hora
+
+        await client.query(
+            `INSERT INTO password_resets (usuario_id, token_hash, expira_em) VALUES ($1, $2, $3)`,
+            [id, tokenHash, expiraEm]
+        );
+
+        res.json({ ok: true, token: tokenBruto });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ erro: 'Erro ao gerar link de redefinição' });
     } finally {
         client.release();
     }
@@ -110,7 +147,7 @@ router.patch('/:id/desativar', autorizar('admin'), async (req, res) => {
 
     const client = await comConexaoTenant(req.usuario.associacao_id);
     try {
-        await client.query(`UPDATE usuarios SET ativo = false WHERE id = $1`, [id]);
+        await client.query(`UPDATE usuarios SET ativo = false WHERE id = $1 AND associacao_id = $2`, [id, req.usuario.associacao_id]);
         res.json({ ok: true });
     } catch (err) {
         console.error(err);
@@ -139,9 +176,9 @@ router.put('/:id', autorizar('admin'), async (req, res) => {
     try {
         const resultado = await client.query(
             `UPDATE usuarios SET nome = $1, papel = COALESCE($2, papel)
-             WHERE id = $3
+             WHERE id = $3 AND associacao_id = $4
              RETURNING id, nome, email, papel, ativo, criado_em`,
-            [nome.trim(), papel || null, id]
+            [nome.trim(), papel || null, id, req.usuario.associacao_id]
         );
         if (resultado.rows.length === 0) {
             return res.status(404).json({ erro: 'Usuário não encontrado' });
@@ -165,7 +202,7 @@ router.delete('/:id', autorizar('admin'), async (req, res) => {
 
     const client = await comConexaoTenant(req.usuario.associacao_id);
     try {
-        const resultado = await client.query(`DELETE FROM usuarios WHERE id = $1 RETURNING id`, [id]);
+        const resultado = await client.query(`DELETE FROM usuarios WHERE id = $1 AND associacao_id = $2 RETURNING id`, [id, req.usuario.associacao_id]);
         if (resultado.rows.length === 0) {
             return res.status(404).json({ erro: 'Usuário não encontrado' });
         }

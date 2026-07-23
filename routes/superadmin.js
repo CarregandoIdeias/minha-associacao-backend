@@ -3,7 +3,8 @@ const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const pool = require('../db');
-const { autenticarSuperAdmin } = require('../middleware/auth');
+const { autenticarSuperAdmin, comConexaoSuperAdmin } = require('../middleware/auth');
+const { limiteLogin } = require('../middleware/rateLimiter');
 const { emailValido } = require('../utils/validacao');
 
 const router = express.Router();
@@ -12,6 +13,7 @@ const JWT_SECRET = process.env.JWT_SECRET || 'troque-isso-em-producao';
 // POST /superadmin/bootstrap
 // Cria o PRIMEIRO super-admin. Só funciona se ainda não existir nenhum
 // (autodesabilita depois do primeiro uso — não precisa de token para chamar essa vez).
+// super_admins não tem RLS, então pool.query direto é seguro aqui.
 router.post('/bootstrap', async (req, res) => {
     const { nome, email, senha } = req.body;
 
@@ -44,7 +46,7 @@ router.post('/bootstrap', async (req, res) => {
 });
 
 // POST /superadmin/login
-router.post('/login', async (req, res) => {
+router.post('/login', limiteLogin, async (req, res) => {
     const { email, senha } = req.body;
 
     if (!email || !senha) {
@@ -83,8 +85,10 @@ router.post('/login', async (req, res) => {
 router.use(autenticarSuperAdmin);
 
 // GET /superadmin/associacoes — lista todas as associações com contadores agregados e filtros
+// Toca associados/cobrancas (têm RLS) -> usa conexão de bypass do super-admin
 router.get('/associacoes', async (req, res) => {
     const { busca, cidade, plano, status } = req.query;
+    const client = await comConexaoSuperAdmin();
     try {
         const condicoes = [];
         const valores = [];
@@ -106,7 +110,7 @@ router.get('/associacoes', async (req, res) => {
 
         const where = condicoes.length ? `WHERE ${condicoes.join(' AND ')}` : '';
 
-        const resultado = await pool.query(`
+        const resultado = await client.query(`
             SELECT a.id, a.nome, a.tipo, a.email, a.telefone, a.endereco, a.cidade, a.estado, a.cnpj,
                    a.plano, a.ativo, a.criado_em,
                    (SELECT COUNT(*) FROM associados ass WHERE ass.associacao_id = a.id) AS total_associados,
@@ -120,24 +124,27 @@ router.get('/associacoes', async (req, res) => {
     } catch (err) {
         console.error(err);
         res.status(500).json({ erro: 'Erro ao listar associações' });
+    } finally {
+        client.release();
     }
 });
 
 // GET /superadmin/associacoes/:id — detalhe completo de uma associação
 router.get('/associacoes/:id', async (req, res) => {
     const { id } = req.params;
+    const client = await comConexaoSuperAdmin();
     try {
-        const associacao = await pool.query(`SELECT * FROM associacoes WHERE id = $1`, [id]);
+        const associacao = await client.query(`SELECT * FROM associacoes WHERE id = $1`, [id]);
         if (associacao.rows.length === 0) {
             return res.status(404).json({ erro: 'Associação não encontrada' });
         }
 
-        const admin = await pool.query(
+        const admin = await client.query(
             `SELECT id, nome, email, ativo, criado_em FROM usuarios WHERE associacao_id = $1 AND papel = 'admin' LIMIT 1`,
             [id]
         );
 
-        const financeiro = await pool.query(`
+        const financeiro = await client.query(`
             SELECT
                 (SELECT COALESCE(SUM(p.valor_pago), 0) FROM pagamentos p
                    JOIN cobrancas c ON c.id = p.cobranca_id WHERE c.associacao_id = $1) AS total_recebido,
@@ -153,14 +160,17 @@ router.get('/associacoes/:id', async (req, res) => {
     } catch (err) {
         console.error(err);
         res.status(500).json({ erro: 'Erro ao buscar detalhes da associação' });
+    } finally {
+        client.release();
     }
 });
 
 // GET /superadmin/associacoes/:id/associados — lista só-leitura dos associados dessa associação
 router.get('/associacoes/:id/associados', async (req, res) => {
     const { id } = req.params;
+    const client = await comConexaoSuperAdmin();
     try {
-        const resultado = await pool.query(
+        const resultado = await client.query(
             `SELECT id, nome_completo, cpf, telefone, categoria, status, data_ingresso
              FROM associados WHERE associacao_id = $1 ORDER BY nome_completo`,
             [id]
@@ -169,14 +179,17 @@ router.get('/associacoes/:id/associados', async (req, res) => {
     } catch (err) {
         console.error(err);
         res.status(500).json({ erro: 'Erro ao listar associados' });
+    } finally {
+        client.release();
     }
 });
 
 // GET /superadmin/associacoes/:id/cobrancas — lista só-leitura das cobranças dessa associação
 router.get('/associacoes/:id/cobrancas', async (req, res) => {
     const { id } = req.params;
+    const client = await comConexaoSuperAdmin();
     try {
-        const resultado = await pool.query(
+        const resultado = await client.query(
             `SELECT c.id, c.descricao, c.valor, c.vencimento, c.status, a.nome_completo AS associado_nome
              FROM cobrancas c JOIN associados a ON a.id = c.associado_id
              WHERE c.associacao_id = $1 ORDER BY c.vencimento DESC LIMIT 200`,
@@ -186,6 +199,8 @@ router.get('/associacoes/:id/cobrancas', async (req, res) => {
     } catch (err) {
         console.error(err);
         res.status(500).json({ erro: 'Erro ao listar cobranças' });
+    } finally {
+        client.release();
     }
 });
 
@@ -198,9 +213,10 @@ router.patch('/associacoes/:id/resetar-senha-admin', async (req, res) => {
         return res.status(400).json({ erro: 'nova_senha deve ter ao menos 6 caracteres' });
     }
 
+    const client = await comConexaoSuperAdmin();
     try {
         const senhaHash = await bcrypt.hash(nova_senha, 10);
-        const resultado = await pool.query(
+        const resultado = await client.query(
             `UPDATE usuarios SET senha_hash = $1
              WHERE associacao_id = $2 AND papel = 'admin'
              RETURNING id, email`,
@@ -213,13 +229,16 @@ router.patch('/associacoes/:id/resetar-senha-admin', async (req, res) => {
     } catch (err) {
         console.error(err);
         res.status(500).json({ erro: 'Erro ao redefinir senha' });
+    } finally {
+        client.release();
     }
 });
 
 // GET /superadmin/dashboard — KPIs agregados de toda a plataforma
 router.get('/dashboard', async (req, res) => {
+    const client = await comConexaoSuperAdmin();
     try {
-        const kpis = await pool.query(`
+        const kpis = await client.query(`
             SELECT
                 (SELECT COUNT(*) FROM associacoes) AS total_associacoes,
                 (SELECT COUNT(*) FROM associacoes WHERE ativo = true) AS associacoes_ativas,
@@ -231,14 +250,14 @@ router.get('/dashboard', async (req, res) => {
                 (SELECT COALESCE(SUM(p.valor_pago), 0) FROM pagamentos p WHERE p.pago_em >= date_trunc('month', now())) AS receita_mensal
         `);
 
-        const crescimentoAssociacoes = await pool.query(`
+        const crescimentoAssociacoes = await client.query(`
             SELECT to_char(mes, 'YYYY-MM') AS mes, COUNT(a.id) AS total
             FROM generate_series(date_trunc('month', now()) - interval '6 months', date_trunc('month', now()), interval '1 month') AS mes
             LEFT JOIN associacoes a ON date_trunc('month', a.criado_em) = mes
             GROUP BY mes ORDER BY mes
         `);
 
-        const novosAssociados = await pool.query(`
+        const novosAssociados = await client.query(`
             SELECT to_char(mes, 'YYYY-MM') AS mes, COUNT(ass.id) AS total
             FROM generate_series(date_trunc('month', now()) - interval '6 months', date_trunc('month', now()), interval '1 month') AS mes
             LEFT JOIN associados ass ON date_trunc('month', ass.criado_em) = mes
@@ -253,6 +272,8 @@ router.get('/dashboard', async (req, res) => {
     } catch (err) {
         console.error(err);
         res.status(500).json({ erro: 'Erro ao buscar dashboard' });
+    } finally {
+        client.release();
     }
 });
 
@@ -273,7 +294,7 @@ router.post('/associacoes', async (req, res) => {
         return res.status(400).json({ erro: 'senha do admin deve ter ao menos 6 caracteres' });
     }
 
-    const client = await pool.connect();
+    const client = await comConexaoSuperAdmin();
     try {
         await client.query('BEGIN');
 
@@ -307,6 +328,7 @@ router.post('/associacoes', async (req, res) => {
 });
 
 // PUT /superadmin/associacoes/:id — edita os dados de uma associação
+// (só toca a tabela associacoes, que não tem RLS — pool.query direto está seguro)
 router.put('/associacoes/:id', async (req, res) => {
     const { id } = req.params;
     const { nome, tipo, email, telefone, endereco, cidade, estado, cnpj, ativo } = req.body;
@@ -338,10 +360,13 @@ router.put('/associacoes/:id', async (req, res) => {
 });
 
 // DELETE /superadmin/associacoes/:id — remove a associação e tudo que pertence a ela
+// O ON DELETE CASCADE toca associados/cobrancas/usuarios/comunicados/pagamentos
+// (todas com RLS) -> precisa da conexão de bypass do super-admin
 router.delete('/associacoes/:id', async (req, res) => {
     const { id } = req.params;
+    const client = await comConexaoSuperAdmin();
     try {
-        const resultado = await pool.query(`DELETE FROM associacoes WHERE id = $1 RETURNING id`, [id]);
+        const resultado = await client.query(`DELETE FROM associacoes WHERE id = $1 RETURNING id`, [id]);
         if (resultado.rows.length === 0) {
             return res.status(404).json({ erro: 'Associação não encontrada' });
         }
@@ -349,6 +374,8 @@ router.delete('/associacoes/:id', async (req, res) => {
     } catch (err) {
         console.error(err);
         res.status(500).json({ erro: 'Erro ao excluir associação' });
+    } finally {
+        client.release();
     }
 });
 

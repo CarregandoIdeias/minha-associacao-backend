@@ -16,7 +16,9 @@ router.get('/', autorizar('admin', 'diretoria'), async (req, res) => {
         const resultado = await client.query(
             `SELECT id, nome_completo, cpf, telefone, categoria, status, data_ingresso, observacao
              FROM associados
-             ORDER BY nome_completo`
+             WHERE associacao_id = $1
+             ORDER BY nome_completo`,
+            [req.usuario.associacao_id]
         );
         res.json(resultado.rows);
     } catch (err) {
@@ -80,9 +82,9 @@ router.put('/:id', autorizar('admin', 'diretoria'), async (req, res) => {
             `UPDATE associados
              SET nome_completo = $1, cpf = $2, telefone = $3, categoria = $4,
                  status = COALESCE($5, status), observacao = $6
-             WHERE id = $7
+             WHERE id = $7 AND associacao_id = $8
              RETURNING id, nome_completo, cpf, telefone, categoria, status, data_ingresso, observacao`,
-            [nome_completo.trim(), cpf || null, telefone || null, categoria || null, status || null, observacao || null, id]
+            [nome_completo.trim(), cpf || null, telefone || null, categoria || null, status || null, observacao || null, id, req.usuario.associacao_id]
         );
 
         if (resultado.rows.length === 0) {
@@ -105,7 +107,7 @@ router.delete('/:id', autorizar('admin'), async (req, res) => {
     const { id } = req.params;
     const client = await comConexaoTenant(req.usuario.associacao_id);
     try {
-        const resultado = await client.query(`DELETE FROM associados WHERE id = $1 RETURNING id`, [id]);
+        const resultado = await client.query(`DELETE FROM associados WHERE id = $1 AND associacao_id = $2 RETURNING id`, [id, req.usuario.associacao_id]);
         if (resultado.rows.length === 0) {
             return res.status(404).json({ erro: 'Associado não encontrado' });
         }

@@ -13,6 +13,9 @@ router.get('/', autorizar('admin', 'diretoria'), async (req, res) => {
         const condicoes = [];
         const valores = [];
 
+        valores.push(req.usuario.associacao_id);
+        condicoes.push(`c.associacao_id = $${valores.length}`);
+
         if (status) {
             valores.push(status);
             condicoes.push(`c.status = $${valores.length}`);
@@ -22,7 +25,7 @@ router.get('/', autorizar('admin', 'diretoria'), async (req, res) => {
             condicoes.push(`c.associado_id = $${valores.length}`);
         }
 
-        const where = condicoes.length ? `WHERE ${condicoes.join(' AND ')}` : '';
+        const where = `WHERE ${condicoes.join(' AND ')}`;
 
         const resultado = await client.query(
             `SELECT c.id, c.descricao, c.valor, c.vencimento, c.status, c.metodo,
@@ -108,8 +111,8 @@ router.patch('/:id/pagar', autorizar('admin', 'diretoria'), async (req, res) => 
         await client.query('BEGIN');
 
         const cobranca = await client.query(
-            `SELECT id, valor, status FROM cobrancas WHERE id = $1`,
-            [id]
+            `SELECT id, valor, status FROM cobrancas WHERE id = $1 AND associacao_id = $2`,
+            [id, req.usuario.associacao_id]
         );
 
         if (cobranca.rows.length === 0) {
@@ -122,8 +125,8 @@ router.patch('/:id/pagar', autorizar('admin', 'diretoria'), async (req, res) => 
         }
 
         await client.query(
-            `UPDATE cobrancas SET status = 'pago', metodo = $1 WHERE id = $2`,
-            [metodo || 'outro', id]
+            `UPDATE cobrancas SET status = 'pago', metodo = $1 WHERE id = $2 AND associacao_id = $3`,
+            [metodo || 'outro', id, req.usuario.associacao_id]
         );
 
         await client.query(
@@ -151,7 +154,7 @@ router.patch('/:id/estornar', autorizar('admin'), async (req, res) => {
     try {
         await client.query('BEGIN');
 
-        const cobranca = await client.query(`SELECT id, status FROM cobrancas WHERE id = $1`, [id]);
+        const cobranca = await client.query(`SELECT id, status FROM cobrancas WHERE id = $1 AND associacao_id = $2`, [id, req.usuario.associacao_id]);
         if (cobranca.rows.length === 0) {
             await client.query('ROLLBACK');
             return res.status(404).json({ erro: 'Cobrança não encontrada' });
@@ -166,8 +169,8 @@ router.patch('/:id/estornar', autorizar('admin'), async (req, res) => {
         await client.query(
             `UPDATE cobrancas
              SET status = 'pendente', metodo = NULL, comprovante_base64 = NULL, comprovante_enviado_em = NULL
-             WHERE id = $1`,
-            [id]
+             WHERE id = $1 AND associacao_id = $2`,
+            [id, req.usuario.associacao_id]
         );
 
         await client.query('COMMIT');
@@ -188,8 +191,8 @@ router.get('/:id/comprovante', autorizar('admin', 'diretoria'), async (req, res)
     const client = await comConexaoTenant(req.usuario.associacao_id);
     try {
         const resultado = await client.query(
-            `SELECT comprovante_base64, comprovante_enviado_em FROM cobrancas WHERE id = $1`,
-            [id]
+            `SELECT comprovante_base64, comprovante_enviado_em FROM cobrancas WHERE id = $1 AND associacao_id = $2`,
+            [id, req.usuario.associacao_id]
         );
         if (resultado.rows.length === 0 || !resultado.rows[0].comprovante_base64) {
             return res.status(404).json({ erro: 'Nenhum comprovante encontrado para essa cobrança' });
@@ -217,7 +220,7 @@ router.put('/:id', autorizar('admin', 'diretoria'), async (req, res) => {
 
     const client = await comConexaoTenant(req.usuario.associacao_id);
     try {
-        const atual = await client.query(`SELECT status FROM cobrancas WHERE id = $1`, [id]);
+        const atual = await client.query(`SELECT status FROM cobrancas WHERE id = $1 AND associacao_id = $2`, [id, req.usuario.associacao_id]);
         if (atual.rows.length === 0) {
             return res.status(404).json({ erro: 'Cobrança não encontrada' });
         }
@@ -227,9 +230,9 @@ router.put('/:id', autorizar('admin', 'diretoria'), async (req, res) => {
 
         const resultado = await client.query(
             `UPDATE cobrancas SET descricao = $1, valor = $2, vencimento = $3
-             WHERE id = $4
+             WHERE id = $4 AND associacao_id = $5
              RETURNING id, descricao, valor, vencimento, status`,
-            [descricao || 'Mensalidade', valor, vencimento, id]
+            [descricao || 'Mensalidade', valor, vencimento, id, req.usuario.associacao_id]
         );
         res.json(resultado.rows[0]);
     } catch (err) {
@@ -245,7 +248,7 @@ router.delete('/:id', autorizar('admin'), async (req, res) => {
     const { id } = req.params;
     const client = await comConexaoTenant(req.usuario.associacao_id);
     try {
-        const resultado = await client.query(`DELETE FROM cobrancas WHERE id = $1 RETURNING id`, [id]);
+        const resultado = await client.query(`DELETE FROM cobrancas WHERE id = $1 AND associacao_id = $2 RETURNING id`, [id, req.usuario.associacao_id]);
         if (resultado.rows.length === 0) {
             return res.status(404).json({ erro: 'Cobrança não encontrada' });
         }

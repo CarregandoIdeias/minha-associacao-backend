@@ -1,9 +1,8 @@
 // middleware/auth.js
 const jwt = require('jsonwebtoken');
 const pool = require('../db');
-const env = require('../config/env');
 
-const JWT_SECRET = env.jwtSecret;
+const JWT_SECRET = process.env.JWT_SECRET || 'troque-isso-em-producao';
 
 // Verifica o token e disponibiliza os dados do usuário em req.usuario
 function autenticar(req, res, next) {
@@ -69,4 +68,15 @@ function autenticarSuperAdmin(req, res, next) {
     }
 }
 
-module.exports = { autenticar, autorizar, comConexaoTenant, autenticarSuperAdmin };
+// Abre uma conexão dedicada com o bypass explícito de RLS para o super-admin.
+// Usada nas rotas de routes/superadmin.js, que legitimamente precisam ver
+// dados de todas as associações. Antes de forçar a RLS (FORCE ROW LEVEL
+// SECURITY) e trocar para um usuário de banco não-dono das tabelas, essa
+// função é inofensiva (a conexão como dono já bypassa RLS de qualquer jeito).
+async function comConexaoSuperAdmin() {
+    const client = await pool.connect();
+    await client.query(`SET app.superadmin_bypass = 'true'`);
+    return client; // lembrar de chamar client.release() depois de usar
+}
+
+module.exports = { autenticar, autorizar, comConexaoTenant, autenticarSuperAdmin, comConexaoSuperAdmin };

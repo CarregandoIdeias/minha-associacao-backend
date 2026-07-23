@@ -4,17 +4,17 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const pool = require('../db');
-const env = require('../config/env');
 const { emailValido } = require('../utils/validacao');
+const { limiteLogin, limiteRedefinicao } = require('../middleware/rateLimiter');
 
 const router = express.Router();
-const JWT_SECRET = env.jwtSecret;
+const JWT_SECRET = process.env.JWT_SECRET || 'troque-isso-em-producao';
 
 // POST /auth/registrar-associacao foi REMOVIDA — a partir de agora, só o
 // super-admin cria novas associações (ver routes/superadmin.js).
 
 // POST /auth/login
-router.post('/login', async (req, res) => {
+router.post('/login', limiteLogin, async (req, res) => {
     const { email, senha, associacao_id } = req.body;
 
     if (!email || !senha || !associacao_id) {
@@ -58,46 +58,18 @@ router.post('/login', async (req, res) => {
 });
 
 // POST /auth/esqueci-senha
-// Gera um token de redefinição válido por 1 hora. Nessa versão simplificada,
-// devolve o link diretamente na resposta (sem envio de e-mail automático) —
-// quem estiver logado como admin deve copiar e enviar manualmente para a pessoa.
+// Não gera mais o token aqui (vulnerabilidade corrigida). Quem esquecer a
+// senha deve pedir para o admin da associação gerar o link (ver
+// routes/usuarios.js -> POST /usuarios/:id/gerar-link-redefinicao).
 router.post('/esqueci-senha', async (req, res) => {
-    const { email, associacao_id } = req.body;
-
-    if (!email || !associacao_id) {
-        return res.status(400).json({ erro: 'email e associacao_id são obrigatórios' });
-    }
-
-    try {
-        const resultado = await pool.query(
-            `SELECT id FROM usuarios WHERE email = $1 AND associacao_id = $2 AND ativo = true`,
-            [email, associacao_id]
-        );
-
-        const usuario = resultado.rows[0];
-        if (!usuario) {
-            // Não revela se o e-mail existe ou não, por segurança
-            return res.json({ ok: true, mensagem: 'Se o e-mail existir, um link de redefinição foi gerado.' });
-        }
-
-        const tokenBruto = crypto.randomBytes(32).toString('hex');
-        const tokenHash = crypto.createHash('sha256').update(tokenBruto).digest('hex');
-        const expiraEm = new Date(Date.now() + 60 * 60 * 1000); // 1 hora
-
-        await pool.query(
-            `INSERT INTO password_resets (usuario_id, token_hash, expira_em) VALUES ($1, $2, $3)`,
-            [usuario.id, tokenHash, expiraEm]
-        );
-
-        res.json({ ok: true, token: tokenBruto });
-    } catch (err) {
-        console.error(err);
-        res.status(500).json({ erro: 'Erro ao gerar redefinição de senha' });
-    }
+    res.json({
+        ok: true,
+        mensagem: 'Entre em contato com o administrador da sua associação para receber um link de redefinição de senha.'
+    });
 });
 
 // POST /auth/redefinir-senha
-router.post('/redefinir-senha', async (req, res) => {
+router.post('/redefinir-senha', limiteRedefinicao, async (req, res) => {
     const { token, senha_nova } = req.body;
 
     if (!token || !senha_nova) {
