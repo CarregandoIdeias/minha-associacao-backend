@@ -2,21 +2,39 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
 const pool = require('../db');
+const config = require('../config/env');
 const { autenticarSuperAdmin, comConexaoSuperAdmin } = require('../middleware/auth');
 const { limiteLogin } = require('../middleware/rateLimiter');
-const { emailValido } = require('../utils/validacao');
+const { emailValido, gerarSenhaProvisoria } = require('../utils/validacao');
+const { registrarEventoAuth } = require('../utils/authLog');
 
 const router = express.Router();
-const JWT_SECRET = process.env.JWT_SECRET || 'troque-isso-em-producao';
+const JWT_SECRET = config.jwtSecret;
+
+// Compara em tempo constante para não vazar, por timing, quantos caracteres
+// do segredo o chamador acertou.
+function segredoValido(recebido, esperado) {
+    if (!recebido || !esperado) return false;
+    const bufRecebido = Buffer.from(recebido);
+    const bufEsperado = Buffer.from(esperado);
+    if (bufRecebido.length !== bufEsperado.length) return false;
+    return crypto.timingSafeEqual(bufRecebido, bufEsperado);
+}
 
 // POST /superadmin/bootstrap
-// Cria o PRIMEIRO super-admin. Só funciona se ainda não existir nenhum
-// (autodesabilita depois do primeiro uso — não precisa de token para chamar essa vez).
+// Cria o PRIMEIRO super-admin. Além de só funcionar se ainda não existir
+// nenhum (autodesabilita depois do primeiro uso), exige o segredo de setup
+// definido em BOOTSTRAP_SECRET — sem isso, quem descobrisse essa rota antes
+// de você rodar o bootstrap se tornaria dono da plataforma inteira.
 // super_admins não tem RLS, então pool.query direto é seguro aqui.
 router.post('/bootstrap', async (req, res) => {
-    const { nome, email, senha } = req.body;
+    const { nome, email, senha, bootstrap_secret } = req.body;
 
+    if (!segredoValido(bootstrap_secret, config.bootstrapSecret)) {
+        return res.status(403).json({ erro: 'Segredo de bootstrap inválido ou não configurado' });
+    }
     if (!nome || !email || !senha) {
         return res.status(400).json({ erro: 'nome, email e senha são obrigatórios' });
     }
@@ -204,20 +222,18 @@ router.get('/associacoes/:id/cobrancas', async (req, res) => {
     }
 });
 
-// PATCH /superadmin/associacoes/:id/resetar-senha-admin — gera uma nova senha para o admin da associação
+// PATCH /superadmin/associacoes/:id/resetar-senha-admin — gera uma nova senha
+// provisória para o admin da associação (mesmo padrão das outras contas:
+// senha aleatória, exibida uma única vez, troca obrigatória no próximo login)
 router.patch('/associacoes/:id/resetar-senha-admin', async (req, res) => {
     const { id } = req.params;
-    const { nova_senha } = req.body;
-
-    if (!nova_senha || nova_senha.length < 6) {
-        return res.status(400).json({ erro: 'nova_senha deve ter ao menos 6 caracteres' });
-    }
 
     const client = await comConexaoSuperAdmin();
     try {
-        const senhaHash = await bcrypt.hash(nova_senha, 10);
+        const senhaProvisoria = gerarSenhaProvisoria();
+        const senhaHash = await bcrypt.hash(senhaProvisoria, 10);
         const resultado = await client.query(
-            `UPDATE usuarios SET senha_hash = $1
+            `UPDATE usuarios SET senha_hash = $1, deve_trocar_senha = true
              WHERE associacao_id = $2 AND papel = 'admin'
              RETURNING id, email`,
             [senhaHash, id]
@@ -225,7 +241,16 @@ router.patch('/associacoes/:id/resetar-senha-admin', async (req, res) => {
         if (resultado.rows.length === 0) {
             return res.status(404).json({ erro: 'Admin dessa associação não encontrado' });
         }
-        res.json({ ok: true, email: resultado.rows[0].email });
+
+        await registrarEventoAuth(client, {
+            usuarioId: resultado.rows[0].id,
+            associacaoId: id,
+            emailTentado: resultado.rows[0].email,
+            evento: 'senha_provisoria_criada',
+            req,
+        });
+
+        res.json({ ok: true, email: resultado.rows[0].email, senha_provisoria: senhaProvisoria });
     } catch (err) {
         console.error(err);
         res.status(500).json({ erro: 'Erro ao redefinir senha' });
@@ -277,21 +302,21 @@ router.get('/dashboard', async (req, res) => {
     }
 });
 
-// POST /superadmin/associacoes — cria uma nova associação + admin inicial dela
+// POST /superadmin/associacoes — cria uma nova associação + admin inicial dela.
+// O e-mail principal da associação é o mesmo usado para o primeiro login do
+// admin — a senha é gerada automaticamente e devolvida uma única vez nesta
+// resposta (enquanto não há envio de e-mail integrado).
 router.post('/associacoes', async (req, res) => {
     const {
         nome_associacao, tipo, email, telefone, endereco, cidade, estado, cnpj,
-        nome_admin, email_admin, senha_admin
+        nome_admin
     } = req.body;
 
-    if (!nome_associacao || !nome_admin || !email_admin || !senha_admin) {
-        return res.status(400).json({ erro: 'nome_associacao, nome_admin, email_admin e senha_admin são obrigatórios' });
+    if (!nome_associacao || !nome_admin || !email) {
+        return res.status(400).json({ erro: 'nome_associacao, nome_admin e email são obrigatórios' });
     }
-    if (!emailValido(email_admin)) {
-        return res.status(400).json({ erro: 'e-mail do admin inválido' });
-    }
-    if (senha_admin.length < 6) {
-        return res.status(400).json({ erro: 'senha do admin deve ter ao menos 6 caracteres' });
+    if (!emailValido(email)) {
+        return res.status(400).json({ erro: 'e-mail da associação inválido' });
     }
 
     const client = await comConexaoSuperAdmin();
@@ -301,23 +326,39 @@ router.post('/associacoes', async (req, res) => {
         const associacao = await client.query(
             `INSERT INTO associacoes (nome, tipo, email, telefone, endereco, cidade, estado, cnpj)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
-            [nome_associacao, tipo || 'outra', email || null, telefone || null, endereco || null, cidade || null, estado || null, cnpj || null]
+            [nome_associacao, tipo || 'outra', email, telefone || null, endereco || null, cidade || null, estado || null, cnpj || null]
         );
         const associacaoId = associacao.rows[0].id;
 
-        const senhaHash = await bcrypt.hash(senha_admin, 10);
+        const senhaProvisoria = gerarSenhaProvisoria();
+        const senhaHash = await bcrypt.hash(senhaProvisoria, 10);
 
         const usuario = await client.query(
-            `INSERT INTO usuarios (associacao_id, nome, email, senha_hash, papel)
-             VALUES ($1, $2, $3, $4, 'admin') RETURNING id, nome, email`,
-            [associacaoId, nome_admin, email_admin, senhaHash]
+            `INSERT INTO usuarios (associacao_id, nome, email, senha_hash, papel, deve_trocar_senha)
+             VALUES ($1, $2, $3, $4, 'admin', true) RETURNING id, nome, email`,
+            [associacaoId, nome_admin, email, senhaHash]
         );
 
+        await registrarEventoAuth(client, {
+            usuarioId: usuario.rows[0].id,
+            associacaoId,
+            emailTentado: email,
+            evento: 'senha_provisoria_criada',
+            req,
+        });
+
         await client.query('COMMIT');
-        res.status(201).json({ associacao_id: associacaoId, admin: usuario.rows[0] });
+        res.status(201).json({
+            associacao_id: associacaoId,
+            admin: usuario.rows[0],
+            senha_provisoria: senhaProvisoria,
+        });
     } catch (err) {
         await client.query('ROLLBACK');
         if (err.code === '23505') {
+            if (err.constraint === 'usuarios_email_unique_idx') {
+                return res.status(409).json({ erro: 'Já existe uma conta com esse e-mail na plataforma' });
+            }
             return res.status(409).json({ erro: 'CNPJ ou e-mail já cadastrado' });
         }
         console.error(err);
@@ -328,7 +369,7 @@ router.post('/associacoes', async (req, res) => {
 });
 
 // PUT /superadmin/associacoes/:id — edita os dados de uma associação
-// (só toca a tabela associacoes, que não tem RLS — pool.query direto está seguro)
+// (associacoes agora tem RLS real -> precisa da conexão de bypass do super-admin)
 router.put('/associacoes/:id', async (req, res) => {
     const { id } = req.params;
     const { nome, tipo, email, telefone, endereco, cidade, estado, cnpj, ativo } = req.body;
@@ -337,8 +378,9 @@ router.put('/associacoes/:id', async (req, res) => {
         return res.status(400).json({ erro: 'nome é obrigatório' });
     }
 
+    const client = await comConexaoSuperAdmin();
     try {
-        const resultado = await pool.query(
+        const resultado = await client.query(
             `UPDATE associacoes
              SET nome = $1, tipo = COALESCE($2, tipo), email = $3, telefone = $4,
                  endereco = $5, cidade = $6, estado = $7, cnpj = $8, ativo = COALESCE($9, ativo)
@@ -356,6 +398,8 @@ router.put('/associacoes/:id', async (req, res) => {
         }
         console.error(err);
         res.status(500).json({ erro: 'Erro ao editar associação' });
+    } finally {
+        client.release();
     }
 });
 

@@ -2,11 +2,13 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
-const { autenticar, autorizar, comConexaoTenant } = require('../middleware/auth');
-const { emailValido } = require('../utils/validacao');
+const { autenticar, bloquearSenhaProvisoria, autorizar, comConexaoTenant } = require('../middleware/auth');
+const { emailValido, gerarSenhaProvisoria } = require('../utils/validacao');
+const { registrarEventoAuth } = require('../utils/authLog');
 
 const router = express.Router();
 router.use(autenticar);
+router.use(bloquearSenhaProvisoria);
 
 // GET /usuarios — lista os usuários da associação (só admin)
 router.get('/', autorizar('admin'), async (req, res) => {
@@ -28,21 +30,20 @@ router.get('/', autorizar('admin'), async (req, res) => {
     }
 });
 
-// POST /usuarios — convida/cria um novo usuário na mesma associação (só admin)
+// POST /usuarios — convida/cria um novo usuário na mesma associação (só admin).
+// A senha é sempre gerada automaticamente e devolvida uma única vez nesta
+// resposta — o convidado troca por uma senha própria no primeiro login.
 router.post('/', autorizar('admin'), async (req, res) => {
-    const { nome, email, senha, papel, associado_id } = req.body;
+    const { nome, email, papel, associado_id } = req.body;
 
-    if (!nome || !email || !senha || !papel) {
-        return res.status(400).json({ erro: 'nome, email, senha e papel são obrigatórios' });
+    if (!nome || !email || !papel) {
+        return res.status(400).json({ erro: 'nome, email e papel são obrigatórios' });
     }
     if (!emailValido(email)) {
         return res.status(400).json({ erro: 'e-mail inválido' });
     }
     if (!['diretoria', 'associado'].includes(papel)) {
         return res.status(400).json({ erro: 'papel deve ser "diretoria" ou "associado"' });
-    }
-    if (senha.length < 6) {
-        return res.status(400).json({ erro: 'senha deve ter ao menos 6 caracteres' });
     }
     if (papel === 'associado' && !associado_id) {
         return res.status(400).json({ erro: 'associado_id é obrigatório para o papel "associado"' });
@@ -52,11 +53,12 @@ router.post('/', autorizar('admin'), async (req, res) => {
     try {
         await client.query('BEGIN');
 
-        const senhaHash = await bcrypt.hash(senha, 10);
+        const senhaProvisoria = gerarSenhaProvisoria();
+        const senhaHash = await bcrypt.hash(senhaProvisoria, 10);
 
         const resultado = await client.query(
-            `INSERT INTO usuarios (associacao_id, nome, email, senha_hash, papel)
-             VALUES ($1, $2, $3, $4, $5)
+            `INSERT INTO usuarios (associacao_id, nome, email, senha_hash, papel, deve_trocar_senha)
+             VALUES ($1, $2, $3, $4, $5, true)
              RETURNING id, nome, email, papel, ativo, criado_em`,
             [req.usuario.associacao_id, nome, email, senhaHash, papel]
         );
@@ -73,12 +75,20 @@ router.post('/', autorizar('admin'), async (req, res) => {
             }
         }
 
+        await registrarEventoAuth(client, {
+            usuarioId: novoUsuario.id,
+            associacaoId: req.usuario.associacao_id,
+            emailTentado: email,
+            evento: 'senha_provisoria_criada',
+            req,
+        });
+
         await client.query('COMMIT');
-        res.status(201).json(novoUsuario);
+        res.status(201).json({ ...novoUsuario, senha_provisoria: senhaProvisoria });
     } catch (err) {
         await client.query('ROLLBACK');
         if (err.code === '23505') {
-            return res.status(409).json({ erro: 'Já existe um usuário com esse e-mail nessa associação' });
+            return res.status(409).json({ erro: 'Já existe uma conta com esse e-mail na plataforma' });
         }
         console.error(err);
         res.status(500).json({ erro: 'Erro ao criar usuário' });
@@ -99,6 +109,29 @@ router.get('/associados-sem-login', autorizar('admin'), async (req, res) => {
     } catch (err) {
         console.error(err);
         res.status(500).json({ erro: 'Erro ao listar associados sem login' });
+    } finally {
+        client.release();
+    }
+});
+
+// GET /usuarios/logs-autenticacao — histórico de eventos de autenticação da
+// associação (login, logout, troca/redefinição de senha), mais recente primeiro
+router.get('/logs-autenticacao', autorizar('admin'), async (req, res) => {
+    const client = await comConexaoTenant(req.usuario.associacao_id);
+    try {
+        const resultado = await client.query(
+            `SELECT l.id, l.evento, l.email_tentado, l.ip, l.criado_em, u.nome AS usuario_nome
+             FROM auth_logs l
+             LEFT JOIN usuarios u ON u.id = l.usuario_id
+             WHERE l.associacao_id = $1
+             ORDER BY l.criado_em DESC
+             LIMIT 200`,
+            [req.usuario.associacao_id]
+        );
+        res.json(resultado.rows);
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ erro: 'Erro ao listar logs de autenticação' });
     } finally {
         client.release();
     }

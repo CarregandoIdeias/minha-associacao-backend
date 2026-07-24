@@ -30,4 +30,8 @@ module.exports = {
     databaseUrl: isProduction ? required('DATABASE_URL') : process.env.DATABASE_URL,
     jwtSecret: isProduction ? required('JWT_SECRET') : (process.env.JWT_SECRET || 'somente-desenvolvimento-nao-use-em-producao'),
     corsOrigins: origins,
+    // Sem valor padrão de propósito: se não estiver configurado, o endpoint
+    // de bootstrap do super-admin fica sempre bloqueado (falha segura), em
+    // vez de derrubar o servidor inteiro por causa de uma rota de uso único.
+    bootstrapSecret: process.env.BOOTSTRAP_SECRET || null,
 };

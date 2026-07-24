@@ -1,9 +1,10 @@
 // routes/configuracoes.js
 const express = require('express');
-const { autenticar, autorizar, comConexaoTenant } = require('../middleware/auth');
+const { autenticar, bloquearSenhaProvisoria, autorizar, comConexaoTenant } = require('../middleware/auth');
 
 const router = express.Router();
 router.use(autenticar);
+router.use(bloquearSenhaProvisoria);
 
 // GET /configuracoes/pix — qualquer usuário autenticado pode ler (precisa para montar o QR code)
 router.get('/pix', async (req, res) => {

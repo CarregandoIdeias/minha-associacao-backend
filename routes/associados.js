@@ -1,13 +1,16 @@
 // routes/associados.js
 // CRUD completo já usando o isolamento por tenant (RLS).
 const express = require('express');
-const { autenticar, autorizar, comConexaoTenant } = require('../middleware/auth');
-const { cpfValido } = require('../utils/validacao');
+const bcrypt = require('bcryptjs');
+const { autenticar, bloquearSenhaProvisoria, autorizar, comConexaoTenant } = require('../middleware/auth');
+const { cpfValido, emailValido, gerarSenhaProvisoria } = require('../utils/validacao');
+const { registrarEventoAuth } = require('../utils/authLog');
 
 const router = express.Router();
 
 // Todas as rotas abaixo exigem estar logado
 router.use(autenticar);
+router.use(bloquearSenhaProvisoria);
 
 // GET /associados — lista os associados da associação do usuário logado (só admin/diretoria)
 router.get('/', autorizar('admin', 'diretoria'), async (req, res) => {
@@ -29,9 +32,10 @@ router.get('/', autorizar('admin', 'diretoria'), async (req, res) => {
     }
 });
 
-// POST /associados — cria um novo associado (só admin/diretoria)
+// POST /associados — cria um associado e já provisiona o login dele com uma
+// senha gerada automaticamente (só admin/diretoria)
 router.post('/', autorizar('admin', 'diretoria'), async (req, res) => {
-    const { nome_completo, cpf, telefone, categoria, observacao } = req.body;
+    const { nome_completo, cpf, telefone, categoria, observacao, email } = req.body;
 
     if (!nome_completo || !nome_completo.trim()) {
         return res.status(400).json({ erro: 'nome_completo é obrigatório' });
@@ -39,19 +43,51 @@ router.post('/', autorizar('admin', 'diretoria'), async (req, res) => {
     if (cpf && !cpfValido(cpf)) {
         return res.status(400).json({ erro: 'CPF inválido' });
     }
+    if (!email || !emailValido(email)) {
+        return res.status(400).json({ erro: 'e-mail válido é obrigatório' });
+    }
 
     const client = await comConexaoTenant(req.usuario.associacao_id);
     try {
-        const resultado = await client.query(
-            `INSERT INTO associados (associacao_id, nome_completo, cpf, telefone, categoria, observacao)
-             VALUES ($1, $2, $3, $4, $5, $6)
-             RETURNING id, nome_completo, cpf, telefone, categoria, status, data_ingresso, observacao`,
-            [req.usuario.associacao_id, nome_completo.trim(), cpf || null, telefone || null, categoria || null, observacao || null]
+        await client.query('BEGIN');
+
+        const senhaProvisoria = gerarSenhaProvisoria();
+        const senhaHash = await bcrypt.hash(senhaProvisoria, 10);
+
+        const usuario = await client.query(
+            `INSERT INTO usuarios (associacao_id, nome, email, senha_hash, papel, deve_trocar_senha)
+             VALUES ($1, $2, $3, $4, 'associado', true)
+             RETURNING id`,
+            [req.usuario.associacao_id, nome_completo.trim(), email.trim(), senhaHash]
         );
-        res.status(201).json(resultado.rows[0]);
+
+        const resultado = await client.query(
+            `INSERT INTO associados (associacao_id, usuario_id, nome_completo, cpf, telefone, categoria, observacao)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
+             RETURNING id, nome_completo, cpf, telefone, categoria, status, data_ingresso, observacao`,
+            [req.usuario.associacao_id, usuario.rows[0].id, nome_completo.trim(), cpf || null, telefone || null, categoria || null, observacao || null]
+        );
+
+        await registrarEventoAuth(client, {
+            usuarioId: usuario.rows[0].id,
+            associacaoId: req.usuario.associacao_id,
+            emailTentado: email,
+            evento: 'senha_provisoria_criada',
+            req,
+        });
+
+        await client.query('COMMIT');
+        res.status(201).json({ ...resultado.rows[0], email: email.trim(), senha_provisoria: senhaProvisoria });
     } catch (err) {
+        await client.query('ROLLBACK');
         if (err.code === '23505') {
-            return res.status(409).json({ erro: 'Já existe um associado com esse CPF nessa associação' });
+            if (err.constraint === 'associados_associacao_id_cpf_key') {
+                return res.status(409).json({ erro: 'Já existe um associado com esse CPF nessa associação' });
+            }
+            if (err.constraint === 'usuarios_email_unique_idx') {
+                return res.status(409).json({ erro: 'Já existe uma conta com esse e-mail na plataforma' });
+            }
+            return res.status(409).json({ erro: 'Registro duplicado' });
         }
         console.error(err);
         res.status(500).json({ erro: 'Erro ao criar associado' });

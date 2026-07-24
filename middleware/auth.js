@@ -1,8 +1,9 @@
 // middleware/auth.js
 const jwt = require('jsonwebtoken');
 const pool = require('../db');
+const config = require('../config/env');
 
-const JWT_SECRET = process.env.JWT_SECRET || 'troque-isso-em-producao';
+const JWT_SECRET = config.jwtSecret;
 
 // Verifica o token e disponibiliza os dados do usuário em req.usuario
 function autenticar(req, res, next) {
@@ -15,11 +16,24 @@ function autenticar(req, res, next) {
 
     try {
         const payload = jwt.verify(token, JWT_SECRET);
-        req.usuario = payload; // { id, associacao_id, papel, email }
+        req.usuario = payload; // { id, associacao_id, papel, email, deve_trocar_senha }
         next();
     } catch (err) {
         return res.status(401).json({ erro: 'Token inválido ou expirado' });
     }
+}
+
+// Bloqueia rotas normais enquanto o usuário estiver com senha provisória
+// pendente de troca (primeiro acesso). Usar logo depois de autenticar() em
+// cada router, exceto na rota de troca de senha em si.
+function bloquearSenhaProvisoria(req, res, next) {
+    if (req.usuario && req.usuario.deve_trocar_senha) {
+        return res.status(403).json({
+            erro: 'Você precisa definir uma nova senha antes de continuar',
+            codigo: 'SENHA_PROVISORIA_PENDENTE',
+        });
+    }
+    next();
 }
 
 // Garante que só determinados papéis acessem a rota
@@ -43,7 +57,7 @@ async function comConexaoTenant(associacaoId) {
         throw new Error('associacaoId inválido');
     }
     const client = await pool.connect();
-    await client.query(`SET app.current_associacao_id = '${associacaoId}'`);
+    await client.query(`SELECT set_config('app.current_associacao_id', $1, false)`, [associacaoId]);
     return client; // lembrar de chamar client.release() depois de usar
 }
 
@@ -70,13 +84,32 @@ function autenticarSuperAdmin(req, res, next) {
 
 // Abre uma conexão dedicada com o bypass explícito de RLS para o super-admin.
 // Usada nas rotas de routes/superadmin.js, que legitimamente precisam ver
-// dados de todas as associações. Antes de forçar a RLS (FORCE ROW LEVEL
-// SECURITY) e trocar para um usuário de banco não-dono das tabelas, essa
-// função é inofensiva (a conexão como dono já bypassa RLS de qualquer jeito).
+// dados de todas as associações. A flag só é setada aqui, nunca a partir de
+// input do usuário — é isso que torna o bypass seguro.
 async function comConexaoSuperAdmin() {
     const client = await pool.connect();
-    await client.query(`SET app.superadmin_bypass = 'true'`);
+    await client.query(`SELECT set_config('app.superadmin_bypass', 'true', false)`);
     return client; // lembrar de chamar client.release() depois de usar
 }
 
-module.exports = { autenticar, autorizar, comConexaoTenant, autenticarSuperAdmin, comConexaoSuperAdmin };
+// Abre uma conexão dedicada com bypass para os fluxos públicos de
+// autenticação (login por e-mail, redefinição de senha por token) — os
+// únicos pontos que legitimamente precisam ler usuarios/associacoes antes
+// de saber a qual tenant a requisição pertence (é isso que estão
+// descobrindo). Mesmo princípio de segurança do comConexaoSuperAdmin: a
+// flag nunca vem de input do usuário, só é setada por este código.
+async function comConexaoAuth() {
+    const client = await pool.connect();
+    await client.query(`SELECT set_config('app.auth_bypass', 'true', false)`);
+    return client; // lembrar de chamar client.release() depois de usar
+}
+
+module.exports = {
+    autenticar,
+    bloquearSenhaProvisoria,
+    autorizar,
+    comConexaoTenant,
+    autenticarSuperAdmin,
+    comConexaoSuperAdmin,
+    comConexaoAuth,
+};
