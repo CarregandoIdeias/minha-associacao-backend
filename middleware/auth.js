@@ -5,8 +5,11 @@ const config = require('../config/env');
 
 const JWT_SECRET = config.jwtSecret;
 
-// Verifica o token e disponibiliza os dados do usuário em req.usuario
-function autenticar(req, res, next) {
+// Verifica o token e disponibiliza os dados do usuário em req.usuario.
+// Também revalida contra o banco a cada requisição (usuário/associação
+// ainda ativos, papel em dia) — sem isso, desativar alguém ou bloquear a
+// associação só valeria depois do token expirar (até 8h depois).
+async function autenticar(req, res, next) {
     const header = req.headers.authorization;
     if (!header || !header.startsWith('Bearer ')) {
         return res.status(401).json({ erro: 'Token não fornecido' });
@@ -14,12 +17,36 @@ function autenticar(req, res, next) {
 
     const token = header.split(' ')[1];
 
+    let payload;
     try {
-        const payload = jwt.verify(token, JWT_SECRET);
-        req.usuario = payload; // { id, associacao_id, papel, email, deve_trocar_senha }
-        next();
+        payload = jwt.verify(token, JWT_SECRET);
     } catch (err) {
         return res.status(401).json({ erro: 'Token inválido ou expirado' });
+    }
+
+    const client = await comConexaoAuth();
+    try {
+        const resultado = await client.query(
+            `SELECT u.ativo, u.papel, a.ativo AS associacao_ativa
+             FROM usuarios u
+             JOIN associacoes a ON a.id = u.associacao_id
+             WHERE u.id = $1`,
+            [payload.id]
+        );
+        const usuario = resultado.rows[0];
+        if (!usuario || !usuario.ativo || !usuario.associacao_ativa) {
+            return res.status(401).json({ erro: 'Token inválido ou expirado' });
+        }
+
+        // { id, associacao_id, papel, email, deve_trocar_senha } — papel vem
+        // fresco do banco, não do token, para uma troca de papel valer na hora.
+        req.usuario = { ...payload, papel: usuario.papel };
+        next();
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ erro: 'Erro ao validar sessão' });
+    } finally {
+        client.release();
     }
 }
 
