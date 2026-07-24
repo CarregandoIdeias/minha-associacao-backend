@@ -7,8 +7,11 @@ const pool = require('../db');
 const config = require('../config/env');
 const { autenticarSuperAdmin, comConexaoSuperAdmin } = require('../middleware/auth');
 const { limiteLogin } = require('../middleware/rateLimiter');
-const { emailValido, gerarSenhaProvisoria } = require('../utils/validacao');
+const { emailValido, gerarSenhaProvisoria, cpfValido } = require('../utils/validacao');
 const { registrarEventoAuth } = require('../utils/authLog');
+const { calcularValorMensalidade, statusAssinatura } = require('../utils/precos');
+
+const FORMAS_COBRANCA_VALIDAS = ['pix', 'boleto', 'cartao', 'dinheiro', 'outro'];
 
 const router = express.Router();
 const JWT_SECRET = config.jwtSecret;
@@ -105,7 +108,7 @@ router.use(autenticarSuperAdmin);
 // GET /superadmin/associacoes — lista todas as associações com contadores agregados e filtros
 // Toca associados/cobrancas (têm RLS) -> usa conexão de bypass do super-admin
 router.get('/associacoes', async (req, res) => {
-    const { busca, cidade, plano, status } = req.query;
+    const { busca, cidade, estado, plano, status } = req.query;
     const client = await comConexaoSuperAdmin();
     try {
         const condicoes = [];
@@ -119,6 +122,10 @@ router.get('/associacoes', async (req, res) => {
             valores.push('%' + cidade + '%');
             condicoes.push(`a.cidade ILIKE $${valores.length}`);
         }
+        if (estado) {
+            valores.push(estado);
+            condicoes.push(`a.estado = $${valores.length}`);
+        }
         if (plano) {
             valores.push(plano);
             condicoes.push(`a.plano = $${valores.length}`);
@@ -129,8 +136,10 @@ router.get('/associacoes', async (req, res) => {
         const where = condicoes.length ? `WHERE ${condicoes.join(' AND ')}` : '';
 
         const resultado = await client.query(`
-            SELECT a.id, a.nome, a.tipo, a.email, a.telefone, a.endereco, a.cidade, a.estado, a.cnpj,
-                   a.plano, a.ativo, a.criado_em,
+            SELECT a.id, a.nome, a.tipo, a.email, a.telefone, a.endereco, a.cidade, a.estado, a.cep, a.site, a.cnpj,
+                   a.plano, a.ativo, a.criado_em, a.valor_mensalidade_manual, a.vencimento_assinatura,
+                   a.forma_cobranca, a.dias_alerta_vencimento,
+                   (SELECT nome FROM usuarios u WHERE u.associacao_id = a.id AND u.papel = 'admin' LIMIT 1) AS responsavel_nome,
                    (SELECT COUNT(*) FROM associados ass WHERE ass.associacao_id = a.id) AS total_associados,
                    (SELECT COUNT(*) FROM cobrancas c WHERE c.associacao_id = a.id AND c.status = 'pendente') AS cobrancas_pendentes,
                    (SELECT COUNT(*) FROM cobrancas c WHERE c.associacao_id = a.id AND c.status = 'pendente' AND c.vencimento < CURRENT_DATE) AS cobrancas_atrasadas
@@ -138,7 +147,16 @@ router.get('/associacoes', async (req, res) => {
             ${where}
             ORDER BY a.criado_em DESC
         `, valores);
-        res.json(resultado.rows);
+
+        const hoje = new Date();
+        const linhas = resultado.rows.map((a) => ({
+            ...a,
+            total_associados: parseInt(a.total_associados, 10),
+            valor_mensalidade: calcularValorMensalidade(a.plano, parseInt(a.total_associados, 10), a.valor_mensalidade_manual),
+            status_assinatura: statusAssinatura(a, hoje),
+        }));
+
+        res.json(linhas);
     } catch (err) {
         console.error(err);
         res.status(500).json({ erro: 'Erro ao listar associações' });
@@ -158,7 +176,7 @@ router.get('/associacoes/:id', async (req, res) => {
         }
 
         const admin = await client.query(
-            `SELECT id, nome, email, ativo, criado_em FROM usuarios WHERE associacao_id = $1 AND papel = 'admin' LIMIT 1`,
+            `SELECT id, nome, email, cpf, ativo, criado_em FROM usuarios WHERE associacao_id = $1 AND papel = 'admin' LIMIT 1`,
             [id]
         );
 
@@ -170,8 +188,15 @@ router.get('/associacoes/:id', async (req, res) => {
                 (SELECT MIN(vencimento) FROM cobrancas WHERE associacao_id = $1 AND status = 'pendente') AS proximo_vencimento
         `, [id]);
 
+        const totalAssociados = await client.query(`SELECT COUNT(*) AS total FROM associados WHERE associacao_id = $1`, [id]);
+        const dadosAssociacao = associacao.rows[0];
+        const qtdAssociados = parseInt(totalAssociados.rows[0].total, 10);
+
         res.json({
-            ...associacao.rows[0],
+            ...dadosAssociacao,
+            total_associados: qtdAssociados,
+            valor_mensalidade: calcularValorMensalidade(dadosAssociacao.plano, qtdAssociados, dadosAssociacao.valor_mensalidade_manual),
+            status_assinatura: statusAssinatura(dadosAssociacao, new Date()),
             admin: admin.rows[0] || null,
             financeiro: financeiro.rows[0]
         });
@@ -277,22 +302,91 @@ router.get('/dashboard', async (req, res) => {
 
         const crescimentoAssociacoes = await client.query(`
             SELECT to_char(mes, 'YYYY-MM') AS mes, COUNT(a.id) AS total
-            FROM generate_series(date_trunc('month', now()) - interval '6 months', date_trunc('month', now()), interval '1 month') AS mes
+            FROM generate_series(date_trunc('month', now()) - interval '11 months', date_trunc('month', now()), interval '1 month') AS mes
             LEFT JOIN associacoes a ON date_trunc('month', a.criado_em) = mes
             GROUP BY mes ORDER BY mes
         `);
 
         const novosAssociados = await client.query(`
             SELECT to_char(mes, 'YYYY-MM') AS mes, COUNT(ass.id) AS total
-            FROM generate_series(date_trunc('month', now()) - interval '6 months', date_trunc('month', now()), interval '1 month') AS mes
+            FROM generate_series(date_trunc('month', now()) - interval '11 months', date_trunc('month', now()), interval '1 month') AS mes
             LEFT JOIN associados ass ON date_trunc('month', ass.criado_em) = mes
             GROUP BY mes ORDER BY mes
         `);
 
+        // Receita efetivamente recebida por mês (pagamentos.valor_pago), não a
+        // projeção de MRR — não há como reconstruir a contagem histórica de
+        // associados por associação pra recalcular o MRR de meses passados.
+        const receitaHistorico = await client.query(`
+            SELECT to_char(mes, 'YYYY-MM') AS mes, COALESCE(SUM(p.valor_pago), 0) AS total
+            FROM generate_series(date_trunc('month', now()) - interval '11 months', date_trunc('month', now()), interval '1 month') AS mes
+            LEFT JOIN pagamentos p ON date_trunc('month', p.pago_em) = mes
+            GROUP BY mes ORDER BY mes
+        `);
+
+        const distribuicaoPlanos = await client.query(`
+            SELECT plano, COUNT(*) AS total FROM associacoes GROUP BY plano ORDER BY plano
+        `);
+
+        const ultimasAssociacoes = await client.query(`
+            SELECT id, nome, cidade, estado, plano, ativo, criado_em
+            FROM associacoes ORDER BY criado_em DESC LIMIT 5
+        `);
+
+        // MRR calculado: soma de calcularValorMensalidade() de cada associação
+        // ativa, usando a contagem real de associados de cada uma.
+        const associacoesAtivas = await client.query(`
+            SELECT a.plano, a.valor_mensalidade_manual,
+                   (SELECT COUNT(*) FROM associados ass WHERE ass.associacao_id = a.id) AS total_associados
+            FROM associacoes a WHERE a.ativo = true
+        `);
+        const mrr = associacoesAtivas.rows.reduce((soma, a) => {
+            return soma + calcularValorMensalidade(a.plano, parseInt(a.total_associados, 10), a.valor_mensalidade_manual);
+        }, 0);
+
+        // Alertas: assinaturas vencidas/vencendo (janela por associação via
+        // dias_alerta_vencimento) e associações novas nos últimos 7 dias.
+        const assinaturasAtencao = await client.query(`
+            SELECT nome, vencimento_assinatura,
+                   (vencimento_assinatura < CURRENT_DATE) AS vencida
+            FROM associacoes
+            WHERE ativo = true AND plano != 'trial' AND vencimento_assinatura IS NOT NULL
+              AND vencimento_assinatura <= CURRENT_DATE + (dias_alerta_vencimento || ' days')::interval
+            ORDER BY vencimento_assinatura ASC LIMIT 10
+        `);
+        const associacoesNovas = await client.query(`
+            SELECT nome, criado_em FROM associacoes
+            WHERE criado_em >= now() - interval '7 days'
+            ORDER BY criado_em DESC LIMIT 10
+        `);
+
+        const alertas = [];
+        const totalAtrasadas = parseInt(kpis.rows[0].total_atrasadas, 10);
+        if (totalAtrasadas > 0) {
+            alertas.push({ nivel: 'alerta', texto: `${totalAtrasadas} mensalidade(s) atrasada(s) na plataforma` });
+        }
+        assinaturasAtencao.rows.forEach((a) => {
+            const dataFmt = new Date(a.vencimento_assinatura).toLocaleDateString('pt-BR');
+            alertas.push({
+                nivel: a.vencida ? 'perigo' : 'alerta',
+                texto: a.vencida
+                    ? `Assinatura de "${a.nome}" venceu em ${dataFmt}`
+                    : `Assinatura de "${a.nome}" vence em ${dataFmt}`,
+            });
+        });
+        associacoesNovas.rows.forEach((a) => {
+            alertas.push({ nivel: 'info', texto: `"${a.nome}" foi cadastrada recentemente` });
+        });
+
         res.json({
             ...kpis.rows[0],
+            receita_mrr: mrr,
             crescimento_associacoes: crescimentoAssociacoes.rows,
-            novos_associados: novosAssociados.rows
+            novos_associados: novosAssociados.rows,
+            receita_historico: receitaHistorico.rows,
+            distribuicao_planos: distribuicaoPlanos.rows,
+            ultimas_associacoes: ultimasAssociacoes.rows,
+            alertas: alertas.slice(0, 10),
         });
     } catch (err) {
         console.error(err);
@@ -308,8 +402,9 @@ router.get('/dashboard', async (req, res) => {
 // resposta (enquanto não há envio de e-mail integrado).
 router.post('/associacoes', async (req, res) => {
     const {
-        nome_associacao, tipo, email, telefone, endereco, cidade, estado, cnpj,
-        nome_admin
+        nome_associacao, tipo, email, telefone, endereco, cidade, estado, cep, site, cnpj, logo_base64,
+        nome_admin, cpf,
+        plano, valor_mensalidade_manual, vencimento_assinatura, forma_cobranca
     } = req.body;
 
     if (!nome_associacao || !nome_admin || !email) {
@@ -318,15 +413,24 @@ router.post('/associacoes', async (req, res) => {
     if (!emailValido(email)) {
         return res.status(400).json({ erro: 'e-mail da associação inválido' });
     }
+    if (cpf && !cpfValido(cpf)) {
+        return res.status(400).json({ erro: 'CPF do responsável inválido' });
+    }
+    if (forma_cobranca && !FORMAS_COBRANCA_VALIDAS.includes(forma_cobranca)) {
+        return res.status(400).json({ erro: 'forma_cobranca inválida' });
+    }
 
     const client = await comConexaoSuperAdmin();
     try {
         await client.query('BEGIN');
 
         const associacao = await client.query(
-            `INSERT INTO associacoes (nome, tipo, email, telefone, endereco, cidade, estado, cnpj)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
-            [nome_associacao, tipo || 'outra', email, telefone || null, endereco || null, cidade || null, estado || null, cnpj || null]
+            `INSERT INTO associacoes (nome, tipo, email, telefone, endereco, cidade, estado, cep, site, cnpj, logo_url,
+                                       plano, valor_mensalidade_manual, vencimento_assinatura, forma_cobranca)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) RETURNING id`,
+            [nome_associacao, tipo || 'outra', email, telefone || null, endereco || null, cidade || null, estado || null,
+                cep || null, site || null, cnpj || null, logo_base64 || null,
+                plano || 'trial', valor_mensalidade_manual || null, vencimento_assinatura || null, forma_cobranca || null]
         );
         const associacaoId = associacao.rows[0].id;
 
@@ -334,9 +438,9 @@ router.post('/associacoes', async (req, res) => {
         const senhaHash = await bcrypt.hash(senhaProvisoria, 10);
 
         const usuario = await client.query(
-            `INSERT INTO usuarios (associacao_id, nome, email, senha_hash, papel, deve_trocar_senha)
-             VALUES ($1, $2, $3, $4, 'admin', true) RETURNING id, nome, email`,
-            [associacaoId, nome_admin, email, senhaHash]
+            `INSERT INTO usuarios (associacao_id, nome, email, senha_hash, papel, deve_trocar_senha, cpf)
+             VALUES ($1, $2, $3, $4, 'admin', true, $5) RETURNING id, nome, email`,
+            [associacaoId, nome_admin, email, senhaHash, cpf || null]
         );
 
         await registrarEventoAuth(client, {
@@ -372,27 +476,55 @@ router.post('/associacoes', async (req, res) => {
 // (associacoes agora tem RLS real -> precisa da conexão de bypass do super-admin)
 router.put('/associacoes/:id', async (req, res) => {
     const { id } = req.params;
-    const { nome, tipo, email, telefone, endereco, cidade, estado, cnpj, ativo } = req.body;
+    const {
+        nome, tipo, email, telefone, endereco, cidade, estado, cep, site, cnpj, logo_base64, ativo,
+        plano, valor_mensalidade_manual, vencimento_assinatura, forma_cobranca, cpf
+    } = req.body;
 
     if (!nome || !nome.trim()) {
         return res.status(400).json({ erro: 'nome é obrigatório' });
     }
+    if (cpf && !cpfValido(cpf)) {
+        return res.status(400).json({ erro: 'CPF do responsável inválido' });
+    }
+    if (forma_cobranca && !FORMAS_COBRANCA_VALIDAS.includes(forma_cobranca)) {
+        return res.status(400).json({ erro: 'forma_cobranca inválida' });
+    }
 
     const client = await comConexaoSuperAdmin();
     try {
+        await client.query('BEGIN');
+
         const resultado = await client.query(
             `UPDATE associacoes
              SET nome = $1, tipo = COALESCE($2, tipo), email = $3, telefone = $4,
-                 endereco = $5, cidade = $6, estado = $7, cnpj = $8, ativo = COALESCE($9, ativo)
-             WHERE id = $10
-             RETURNING id, nome, tipo, email, telefone, endereco, cidade, estado, cnpj, ativo`,
-            [nome.trim(), tipo || null, email || null, telefone || null, endereco || null, cidade || null, estado || null, cnpj || null, ativo, id]
+                 endereco = $5, cidade = $6, estado = $7, cnpj = $8, ativo = COALESCE($9, ativo),
+                 cep = $10, site = $11, logo_url = COALESCE($12, logo_url),
+                 plano = COALESCE($13, plano), valor_mensalidade_manual = $14,
+                 vencimento_assinatura = $15, forma_cobranca = $16
+             WHERE id = $17
+             RETURNING id, nome, tipo, email, telefone, endereco, cidade, estado, cnpj, ativo,
+                       cep, site, logo_url, plano, valor_mensalidade_manual, vencimento_assinatura, forma_cobranca`,
+            [nome.trim(), tipo || null, email || null, telefone || null, endereco || null, cidade || null, estado || null, cnpj || null, ativo,
+                cep || null, site || null, logo_base64 || null,
+                plano || null, valor_mensalidade_manual || null, vencimento_assinatura || null, forma_cobranca || null, id]
         );
         if (resultado.rows.length === 0) {
+            await client.query('ROLLBACK');
             return res.status(404).json({ erro: 'Associação não encontrada' });
         }
+
+        if (cpf) {
+            await client.query(
+                `UPDATE usuarios SET cpf = $1 WHERE associacao_id = $2 AND papel = 'admin'`,
+                [cpf, id]
+            );
+        }
+
+        await client.query('COMMIT');
         res.json(resultado.rows[0]);
     } catch (err) {
+        await client.query('ROLLBACK');
         if (err.code === '23505') {
             return res.status(409).json({ erro: 'CNPJ já cadastrado em outra associação' });
         }
