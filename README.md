@@ -2,7 +2,7 @@
 
 **Produto:** Sistema de gestão multi-tenant para associações, com camada de Super Admin (SaaS)
 **Mantido por:** Julião — Carregando Ideias
-**Última atualização:** 24 de julho de 2026
+**Última atualização:** 25 de julho de 2026
 
 ---
 
@@ -124,6 +124,30 @@ Substituiu o login por código/ID da associação. E-mail é único em toda a pl
 ### ✅ Recuperação de senha
 `POST /auth/esqueci-senha` não gera token nenhum (autosserviço por e-mail depende de um provedor de e-mail que ainda não existe — reintroduzir isso sem envio real de e-mail reabriria uma vulnerabilidade já corrigida antes). Um admin gera o link pela rota `POST /usuarios/:id/gerar-link-redefinicao`.
 
+### ✅ Pool de conexões não derruba mais o servidor inteiro (25/07/2026)
+`db.js` não tinha `pool.on('error', ...)` — um cliente ocioso do pool
+tendo a conexão encerrada pelo Supabase (comportamento normal dele)
+gerava um evento `'error'` não tratado no `pg.Pool`, que **derrubava o
+processo Node inteiro**. Era a causa real por trás de rajadas de 500 que
+atingiam várias rotas ao mesmo tempo (o Render reiniciava o serviço
+sozinho, e requisições em trânsito nessa janela falhavam). Corrigido —
+agora só loga o erro. `idleTimeoutMillis` do pool também subiu de 10s
+(padrão do `pg`) para 30s, reduzindo a frequência de reconexões "a frio".
+
+### 🟡 Instabilidade intermitente do pooler — mitigada, causa raiz não confirmada
+Mesmo com o fix acima, `autenticar()` e o login às vezes recebem do
+Postgres `invalid input syntax for type uuid: ""` — inclusive em queries
+sem nenhum parâmetro uuid (evidência de que é resposta de outra query
+concorrente vazando pela conexão, do lado do pooler). `DATABASE_URL` já
+está confirmado no Session Pooler do Supabase (o modo certo para IPv4,
+compatível com prepared statements — o Render não suporta a conexão
+direta, que exige IPv6). Mitigações aplicadas: guarda de UUID válido
+antes de consultar (vira 401 limpo em vez de 500) + retry de uma
+tentativa com conexão nova, tanto em `autenticar()` quanto no login. Não
+foi possível reproduzir de forma controlada nem com carga concorrente
+simulada. Se voltar a acontecer em uso real, vale abrir chamado com o
+suporte do Supabase citando o erro exato (`22P02`, `string_to_uuid`).
+
 ### 🟡 Pendente, não urgente
 - Token de sessão fica em `localStorage` no front-end — já bem mitigado pelo CORS restrito; o ideal estrutural seria migrar para cookie `httpOnly`
 - Sem cache na revalidação de JWT — cada requisição autenticada faz uma consulta extra ao banco. Irrelevante no volume atual; só vale revisitar se o uso crescer muito
@@ -182,9 +206,9 @@ Em produção, o servidor recusa subir se `DATABASE_URL`, `JWT_SECRET` ou `CORS_
 
 ## 9. Pendências conhecidas / roadmap
 
-- Reordenar menu do associado (Meus Dados como página inicial)
+- Reordenar menu do associado (Meus Dados como página inicial) — pendente só para o papel associado; admin/diretoria já ganhou Dashboard como tela inicial em 25/07/2026
 - Saudação personalizada no cabeçalho do painel da associação (já existe no Super Admin)
-- Revisão geral de UX/UI do painel da associação
+- Revisão geral de UX/UI do painel da associação — parcialmente feita em 25/07/2026 (Dashboard, submenu de Associados, menu hambúrguer responsivo, tela de Configurações reformulada); falta alinhar o restante das telas (Financeiro, Comunicados, Usuários) ao mesmo padrão visual mais moderno
 - Integração real de pagamento (Pix via gateway — Asaas/Efí), hoje é confirmação manual
 - Comunicados em massa (Super Admin → várias associações) e Relatórios exportáveis
 - Usuários da plataforma com perfis (Super Admin, Suporte, Financeiro) e Configurações gerais
