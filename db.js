@@ -18,4 +18,14 @@ const pool = new Pool({
     ssl: config.isProduction ? { rejectUnauthorized: true, ca: supabaseCa } : false,
 });
 
+// Sem esse listener, um cliente ocioso no pool que tenha a conexão encerrada
+// pelo banco (o Supabase derruba conexões ociosas periodicamente) emite um
+// evento 'error' não tratado no pool -- e isso derruba o processo Node
+// inteiro. É a causa real por trás dos 500 intermitentes e em rajada que
+// apareciam em várias rotas ao mesmo tempo (o Render reinicia o serviço,
+// e as requisições em trânsito nessa janela falham).
+pool.on('error', (err) => {
+    console.error('Erro inesperado em cliente ocioso do pool de conexões:', err);
+});
+
 module.exports = pool;
