@@ -33,29 +33,40 @@ async function autenticar(req, res, next) {
         return res.status(401).json({ erro: 'Token inválido ou expirado' });
     }
 
-    const client = await comConexaoAuth();
-    try {
-        const resultado = await client.query(
-            `SELECT u.ativo, u.papel, a.ativo AS associacao_ativa
-             FROM usuarios u
-             JOIN associacoes a ON a.id = u.associacao_id
-             WHERE u.id = $1`,
-            [payload.id]
-        );
-        const usuario = resultado.rows[0];
-        if (!usuario || !usuario.ativo || !usuario.associacao_ativa) {
-            return res.status(401).json({ erro: 'Token inválido ou expirado' });
-        }
+    // Falhas transitórias de conexão (raras, ainda sem causa confirmada --
+    // suspeita de instabilidade pontual na rota Render -> pooler do Supabase)
+    // já foram vistas derrubando essa consulta com um erro estranho mesmo com
+    // um payload válido. Uma nova tentativa, com uma conexão nova do pool,
+    // resolve o caso comum sem esconder uma falha real (só desiste após a
+    // segunda tentativa).
+    for (let tentativa = 1; tentativa <= 2; tentativa++) {
+        const client = await comConexaoAuth();
+        try {
+            const resultado = await client.query(
+                `SELECT u.ativo, u.papel, a.ativo AS associacao_ativa
+                 FROM usuarios u
+                 JOIN associacoes a ON a.id = u.associacao_id
+                 WHERE u.id = $1`,
+                [payload.id]
+            );
+            const usuario = resultado.rows[0];
+            if (!usuario || !usuario.ativo || !usuario.associacao_ativa) {
+                return res.status(401).json({ erro: 'Token inválido ou expirado' });
+            }
 
-        // { id, associacao_id, papel, email, deve_trocar_senha } — papel vem
-        // fresco do banco, não do token, para uma troca de papel valer na hora.
-        req.usuario = { ...payload, papel: usuario.papel };
-        next();
-    } catch (err) {
-        console.error(err);
-        res.status(500).json({ erro: 'Erro ao validar sessão' });
-    } finally {
-        client.release();
+            // { id, associacao_id, papel, email, deve_trocar_senha } — papel vem
+            // fresco do banco, não do token, para uma troca de papel valer na hora.
+            req.usuario = { ...payload, papel: usuario.papel };
+            return next();
+        } catch (err) {
+            if (tentativa === 2) {
+                console.error(err);
+                return res.status(500).json({ erro: 'Erro ao validar sessão' });
+            }
+            console.error('autenticar: 1a tentativa falhou, tentando de novo com conexao nova:', err.message);
+        } finally {
+            client.release();
+        }
     }
 }
 
