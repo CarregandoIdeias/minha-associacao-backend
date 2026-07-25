@@ -5,6 +5,7 @@ const bcrypt = require('bcryptjs');
 const { autenticar, bloquearSenhaProvisoria, autorizar, comConexaoTenant } = require('../middleware/auth');
 const { cpfValido, emailValido, gerarSenhaProvisoria } = require('../utils/validacao');
 const { registrarEventoAuth } = require('../utils/authLog');
+const { registrarAtividade } = require('../utils/atividadeLog');
 
 const router = express.Router();
 
@@ -76,6 +77,14 @@ router.post('/', autorizar('admin', 'diretoria'), async (req, res) => {
             req,
         });
 
+        await registrarAtividade(client, {
+            associacaoId: req.usuario.associacao_id,
+            usuarioId: req.usuario.id,
+            usuarioNome: req.usuario.nome,
+            tipo: 'associado_criado',
+            descricao: 'cadastrou o associado ' + resultado.rows[0].nome_completo,
+        });
+
         await client.query('COMMIT');
         res.status(201).json({ ...resultado.rows[0], email: email.trim(), senha_provisoria: senhaProvisoria });
     } catch (err) {
@@ -126,6 +135,15 @@ router.put('/:id', autorizar('admin', 'diretoria'), async (req, res) => {
         if (resultado.rows.length === 0) {
             return res.status(404).json({ erro: 'Associado não encontrado' });
         }
+
+        await registrarAtividade(client, {
+            associacaoId: req.usuario.associacao_id,
+            usuarioId: req.usuario.id,
+            usuarioNome: req.usuario.nome,
+            tipo: 'associado_editado',
+            descricao: 'atualizou o cadastro de ' + resultado.rows[0].nome_completo,
+        });
+
         res.json(resultado.rows[0]);
     } catch (err) {
         if (err.code === '23505') {

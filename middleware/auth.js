@@ -43,7 +43,7 @@ async function autenticar(req, res, next) {
         const client = await comConexaoAuth();
         try {
             const resultado = await client.query(
-                `SELECT u.ativo, u.papel, a.ativo AS associacao_ativa
+                `SELECT u.ativo, u.papel, u.nome, a.ativo AS associacao_ativa
                  FROM usuarios u
                  JOIN associacoes a ON a.id = u.associacao_id
                  WHERE u.id = $1`,
@@ -54,9 +54,11 @@ async function autenticar(req, res, next) {
                 return res.status(401).json({ erro: 'Token inválido ou expirado' });
             }
 
-            // { id, associacao_id, papel, email, deve_trocar_senha } — papel vem
-            // fresco do banco, não do token, para uma troca de papel valer na hora.
-            req.usuario = { ...payload, papel: usuario.papel };
+            // { id, associacao_id, papel, email, deve_trocar_senha, nome } —
+            // papel e nome vêm frescos do banco, não do token, para uma troca de
+            // papel ou de nome valer na hora (nome também usado para o snapshot
+            // em atividades, ver utils/atividadeLog.js).
+            req.usuario = { ...payload, papel: usuario.papel, nome: usuario.nome };
             return next();
         } catch (err) {
             if (tentativa === 2) {

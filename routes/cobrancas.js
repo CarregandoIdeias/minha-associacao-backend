@@ -1,6 +1,7 @@
 // routes/cobrancas.js
 const express = require('express');
 const { autenticar, bloquearSenhaProvisoria, autorizar, comConexaoTenant } = require('../middleware/auth');
+const { registrarAtividade } = require('../utils/atividadeLog');
 
 const router = express.Router();
 router.use(autenticar);
@@ -31,9 +32,11 @@ router.get('/', autorizar('admin', 'diretoria'), async (req, res) => {
         const resultado = await client.query(
             `SELECT c.id, c.descricao, c.valor, c.vencimento, c.status, c.metodo,
                     a.nome_completo AS associado_nome, c.associado_id,
-                    (c.comprovante_base64 IS NOT NULL) AS tem_comprovante
+                    (c.comprovante_base64 IS NOT NULL) AS tem_comprovante,
+                    p.pago_em
              FROM cobrancas c
              JOIN associados a ON a.id = c.associado_id
+             LEFT JOIN pagamentos p ON p.cobranca_id = c.id
              ${where}
              ORDER BY c.vencimento DESC`,
             valores
@@ -112,7 +115,10 @@ router.patch('/:id/pagar', autorizar('admin', 'diretoria'), async (req, res) => 
         await client.query('BEGIN');
 
         const cobranca = await client.query(
-            `SELECT id, valor, status FROM cobrancas WHERE id = $1 AND associacao_id = $2`,
+            `SELECT c.id, c.valor, c.status, a.nome_completo AS associado_nome
+             FROM cobrancas c
+             JOIN associados a ON a.id = c.associado_id
+             WHERE c.id = $1 AND c.associacao_id = $2`,
             [id, req.usuario.associacao_id]
         );
 
@@ -135,6 +141,14 @@ router.patch('/:id/pagar', autorizar('admin', 'diretoria'), async (req, res) => 
              VALUES ($1, $2, $3)`,
             [id, cobranca.rows[0].valor, metodo || 'outro']
         );
+
+        await registrarAtividade(client, {
+            associacaoId: req.usuario.associacao_id,
+            usuarioId: req.usuario.id,
+            usuarioNome: req.usuario.nome,
+            tipo: 'cobranca_paga',
+            descricao: 'registrou o pagamento de ' + cobranca.rows[0].associado_nome,
+        });
 
         await client.query('COMMIT');
         res.json({ ok: true, id, status: 'pago' });

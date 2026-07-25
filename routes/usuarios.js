@@ -5,6 +5,7 @@ const crypto = require('crypto');
 const { autenticar, bloquearSenhaProvisoria, autorizar, comConexaoTenant } = require('../middleware/auth');
 const { emailValido, gerarSenhaProvisoria } = require('../utils/validacao');
 const { registrarEventoAuth } = require('../utils/authLog');
+const { registrarAtividade } = require('../utils/atividadeLog');
 
 const router = express.Router();
 router.use(autenticar);
@@ -81,6 +82,14 @@ router.post('/', autorizar('admin'), async (req, res) => {
             emailTentado: email,
             evento: 'senha_provisoria_criada',
             req,
+        });
+
+        await registrarAtividade(client, {
+            associacaoId: req.usuario.associacao_id,
+            usuarioId: req.usuario.id,
+            usuarioNome: req.usuario.nome,
+            tipo: 'usuario_convidado',
+            descricao: 'convidou ' + novoUsuario.nome + ' como ' + papel,
         });
 
         await client.query('COMMIT');

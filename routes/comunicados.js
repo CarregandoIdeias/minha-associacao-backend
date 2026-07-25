@@ -1,6 +1,7 @@
 // routes/comunicados.js
 const express = require('express');
 const { autenticar, bloquearSenhaProvisoria, autorizar, comConexaoTenant } = require('../middleware/auth');
+const { registrarAtividade } = require('../utils/atividadeLog');
 
 const router = express.Router();
 router.use(autenticar);
@@ -80,6 +81,15 @@ router.post('/', autorizar('admin', 'diretoria'), async (req, res) => {
              RETURNING id, titulo, conteudo, categoria_alvo, publicado_em, status, destaque`,
             [req.usuario.associacao_id, req.usuario.id, titulo, conteudo, categoria_alvo || null, !!destaque, publicado_em || null, status || null]
         );
+
+        await registrarAtividade(client, {
+            associacaoId: req.usuario.associacao_id,
+            usuarioId: req.usuario.id,
+            usuarioNome: req.usuario.nome,
+            tipo: 'comunicado_publicado',
+            descricao: 'publicou o comunicado "' + resultado.rows[0].titulo + '"',
+        });
+
         res.status(201).json(resultado.rows[0]);
     } catch (err) {
         console.error(err);
