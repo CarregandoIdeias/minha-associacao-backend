@@ -4,6 +4,7 @@ const config = require('./config/env'); // valida/derruba o processo se faltar v
 
 const express = require('express');
 const cors = require('cors');
+const { limiteGeral } = require('./middleware/rateLimiter');
 
 const authRoutes = require('./routes/auth');
 const associadosRoutes = require('./routes/associados');
@@ -17,7 +18,18 @@ const atividadesRoutes = require('./routes/atividades');
 
 const app = express();
 
+// O Render coloca o app atrás de um proxy reverso (1 hop) -- sem isso,
+// req.ip (usado pelo express-rate-limit no login) enxerga o IP interno do
+// proxy pra todo mundo, e o limite de tentativas vira compartilhado entre
+// todos os clientes em vez de por-IP de verdade.
+app.set('trust proxy', 1);
+
 app.use(cors({ origin: config.corsOrigins }));
+// Antes de express.json() de propósito -- rejeita rajadas antes de gastar
+// tempo fazendo parse de corpo grande. /auth/login e /auth/redefinir-senha
+// já têm limites mais apertados (limiteLogin/limiteRedefinicao), que somam
+// com este (as duas checagens precisam passar).
+app.use(limiteGeral);
 app.use(express.json({ limit: '6mb' }));
 
 app.use('/auth', authRoutes);

@@ -21,6 +21,11 @@ const pool = new Pool({
     // conexões novas com frequência. Cada conexão nova pela primeira vez é
     // onde os erros intermitentes do pooler do Supabase têm aparecido.
     idleTimeoutMillis: 30000,
+    // Explícito (era o padrão implícito de 10 do pg) -- ver comentário em
+    // config/env.js sobre DB_POOL_MAX: multiplica por instância ao escalar
+    // horizontalmente no Render, então o limite do Session Pooler do
+    // Supabase precisa ser conferido antes de aumentar o nº de instâncias.
+    max: config.poolMax,
 });
 
 // Sem esse listener, um cliente ocioso no pool que tenha a conexão encerrada

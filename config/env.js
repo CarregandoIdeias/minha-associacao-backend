@@ -34,4 +34,11 @@ module.exports = {
     // de bootstrap do super-admin fica sempre bloqueado (falha segura), em
     // vez de derrubar o servidor inteiro por causa de uma rota de uso único.
     bootstrapSecret: process.env.BOOTSTRAP_SECRET || null,
+    // Máximo de conexões que ESTA instância abre no Supabase (toda rota usa
+    // uma conexão dedicada do pool, nunca pool.query(), por causa do RLS via
+    // SET de sessão -- ver comConexaoTenant/SuperAdmin/Auth em middleware/auth.js).
+    // Ao escalar para N instâncias no Render, o total de conexões no Session
+    // Pooler do Supabase é N x poolMax -- ajustar aqui e confirmar o limite
+    // de conexões do plano do Supabase antes de aumentar o número de instâncias.
+    poolMax: Number(process.env.DB_POOL_MAX) || 10,
 };
