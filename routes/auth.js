@@ -41,18 +41,15 @@ router.post('/login', limiteLogin, async (req, res) => {
         return res.status(400).json({ erro: 'email e senha são obrigatórios' });
     }
 
-    const client = await comConexaoAuth();
+    let usuario;
     try {
-        const resultado = await client.query(
-            `SELECT u.id, u.nome, u.email, u.senha_hash, u.papel, u.associacao_id, u.ativo, u.deve_trocar_senha,
-                    a.ativo AS associacao_ativa
-             FROM usuarios u
-             JOIN associacoes a ON a.id = u.associacao_id
-             WHERE lower(u.email) = lower($1)`,
-            [email]
-        );
+        usuario = await buscarUsuarioPorEmail(email);
+    } catch (err) {
+        console.error(err);
+        return res.status(500).json({ erro: 'Erro ao autenticar' });
+    }
 
-        const usuario = resultado.rows[0];
+    try {
         if (!usuario || !usuario.ativo) {
             await registrarEventoAuth(pool, { emailTentado: email, evento: 'login_falha', req });
             return res.status(401).json({ erro: 'Credenciais inválidas' });
@@ -99,10 +96,34 @@ router.post('/login', limiteLogin, async (req, res) => {
     } catch (err) {
         console.error(err);
         res.status(500).json({ erro: 'Erro ao autenticar' });
-    } finally {
-        client.release();
     }
 });
+
+// Busca o usuário pelo e-mail, tentando de novo uma vez com conexão nova se
+// a primeira tentativa falhar -- mesma mitigação usada em autenticar()
+// (middleware/auth.js) para falhas transitórias de conexão intermitentes,
+// causa raiz ainda não confirmada.
+async function buscarUsuarioPorEmail(email) {
+    for (let tentativa = 1; tentativa <= 2; tentativa++) {
+        const client = await comConexaoAuth();
+        try {
+            const resultado = await client.query(
+                `SELECT u.id, u.nome, u.email, u.senha_hash, u.papel, u.associacao_id, u.ativo, u.deve_trocar_senha,
+                        a.ativo AS associacao_ativa
+                 FROM usuarios u
+                 JOIN associacoes a ON a.id = u.associacao_id
+                 WHERE lower(u.email) = lower($1)`,
+                [email]
+            );
+            return resultado.rows[0];
+        } catch (err) {
+            if (tentativa === 2) throw err;
+            console.error('login: 1a tentativa falhou, tentando de novo com conexao nova:', err.message);
+        } finally {
+            client.release();
+        }
+    }
+}
 
 // POST /auth/esqueci-senha
 // Não gera token aqui (autosserviço de recuperação por e-mail depende de um

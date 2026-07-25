@@ -16,6 +16,11 @@ const supabaseCa = fs.readFileSync(path.join(__dirname, 'config', 'supabase-ca.p
 const pool = new Pool({
     connectionString: config.databaseUrl,
     ssl: config.isProduction ? { rejectUnauthorized: true, ca: supabaseCa } : false,
+    // Padrão do pg é 10s -- baixo demais para o padrão de uso real (gaps
+    // entre cliques do usuário são comuns), o que força o pool a abrir
+    // conexões novas com frequência. Cada conexão nova pela primeira vez é
+    // onde os erros intermitentes do pooler do Supabase têm aparecido.
+    idleTimeoutMillis: 30000,
 });
 
 // Sem esse listener, um cliente ocioso no pool que tenha a conexão encerrada
