@@ -4,6 +4,7 @@ const pool = require('../db');
 const config = require('../config/env');
 
 const JWT_SECRET = config.jwtSecret;
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // Verifica o token e disponibiliza os dados do usuário em req.usuario.
 // Também revalida contra o banco a cada requisição (usuário/associação
@@ -21,6 +22,14 @@ async function autenticar(req, res, next) {
     try {
         payload = jwt.verify(token, JWT_SECRET);
     } catch (err) {
+        return res.status(401).json({ erro: 'Token inválido ou expirado' });
+    }
+
+    // Guarda defensiva: se o id do payload não for um uuid válido, trata como
+    // sessão inválida (401) em vez de deixar o Postgres rejeitar o parâmetro
+    // com um erro de tipo (500) — visto acontecer em produção de forma
+    // intermitente, causa exata ainda não confirmada.
+    if (!payload || !payload.id || !UUID_REGEX.test(payload.id)) {
         return res.status(401).json({ erro: 'Token inválido ou expirado' });
     }
 
@@ -77,8 +86,6 @@ function autorizar(...papeisPermitidos) {
 // Abre uma conexão dedicada do pool e ativa o isolamento por tenant (RLS).
 // Necessário porque "SET" é por conexão, não pode usar pool.query direto
 // quando o isolamento depende de estado de sessão.
-const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
 async function comConexaoTenant(associacaoId) {
     if (!UUID_REGEX.test(associacaoId)) {
         throw new Error('associacaoId inválido');
