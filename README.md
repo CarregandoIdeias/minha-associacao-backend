@@ -151,10 +151,19 @@ foi possível reproduzir de forma controlada nem com carga concorrente
 simulada. Se voltar a acontecer em uso real, vale abrir chamado com o
 suporte do Supabase citando o erro exato (`22P02`, `string_to_uuid`).
 
+### ✅ Auditoria de escala — rate-limit por IP, dimensionamento do pool, bcrypt fora da conexão (25/07/2026)
+Segunda rodada de auditoria (a primeira, 24/07, focou em vulnerabilidades críticas; essa focou em escalar sem falhas, a pedido do usuário):
+- **`trust proxy` ausente**: atrás do proxy reverso do Render, `req.ip` via o IP interno do proxy pra todo mundo — o rate-limit do login (`limiteLogin`, por IP) na prática era **compartilhado entre todos os clientes**. Corrigido com `app.set('trust proxy', 1)`.
+- **Pool sem `max` explícito**: `db.js` usava o padrão implícito de 10 do `pg`. Agora é `max: config.poolMax` (env `DB_POOL_MAX`, default 10). Como toda rota abre uma conexão dedicada do pool (exigido pelo RLS via `SET` de sessão, nunca `pool.query()`), escalar para N instâncias no Render multiplica o total de conexões no Supabase por `N × DB_POOL_MAX` — conferir o limite do plano do Supabase antes de aumentar o nº de instâncias.
+- **Rate-limit geral** (`limiteGeral`, 300 req/15min por IP) aplicado a toda a API — antes só login/redefinição de senha tinham algum limite.
+- **bcrypt fora da conexão emprestada do pool**: hash/compare (deliberadamente lento) não segura mais uma conexão do pool (às vezes com transação aberta) enquanto roda, em `associados.js`, `usuarios.js`, `superadmin.js` e `auth.js` — reduz o tempo que cada requisição ocupa uma conexão sob carga concorrente.
+
 ### 🟡 Pendente, não urgente
 - Token de sessão fica em `localStorage` no front-end — já bem mitigado pelo CORS restrito; o ideal estrutural seria migrar para cookie `httpOnly`
+- Sem `helmet`/cabeçalhos de segurança explícitos (`X-Powered-By: Express` vazando por padrão)
 - Sem cache na revalidação de JWT — cada requisição autenticada faz uma consulta extra ao banco. Irrelevante no volume atual; só vale revisitar se o uso crescer muito
 - Sem paginação nas listagens (`/associados`, `/cobrancas`) — ok para o volume atual
+- Fotos/comprovantes guardados em base64 dentro do Postgres (`foto_base64`, `comprovante_base64`, `logo_base64`) — funciona no volume atual, mas migrar para armazenamento de objeto (Supabase Storage/S3, guardando só a URL) evita dor ao crescer
 - Sem testes automatizados, principalmente de isolamento entre tenants
 - Sem ferramenta de migração automatizada (migrations são `.sql` avulsos, aplicados manualmente — ver `supabase/README.md`)
 
@@ -203,9 +212,10 @@ PORT=3000
 NODE_ENV=production
 CORS_ORIGINS=https://minha-associacao-painel.vercel.app
 BOOTSTRAP_SECRET=<segredo forte, usado só para criar o primeiro super-admin>
+DB_POOL_MAX=10
 ```
 
-Em produção, o servidor recusa subir se `DATABASE_URL`, `JWT_SECRET` ou `CORS_ORIGINS` estiverem faltando. `BOOTSTRAP_SECRET` é opcional — se faltar, a rota de bootstrap fica sempre bloqueada (falha segura), não derruba o servidor.
+Em produção, o servidor recusa subir se `DATABASE_URL`, `JWT_SECRET` ou `CORS_ORIGINS` estiverem faltando. `BOOTSTRAP_SECRET` é opcional — se faltar, a rota de bootstrap fica sempre bloqueada (falha segura), não derruba o servidor. `DB_POOL_MAX` é opcional (default 10) — máximo de conexões que **esta instância** abre no Supabase; ao escalar para N instâncias no Render, o total no Session Pooler é `N × DB_POOL_MAX` (ver seção 6, "Auditoria de escala").
 
 ## 9. Pendências conhecidas / roadmap
 

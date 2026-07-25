@@ -29,9 +29,11 @@ documenta um incidente real causado por não seguir essa ordem.
 - `db.js` → pool de conexão, usa a role `app_runtime` (não-dona das
   tabelas) e valida o certificado SSL do Supabase de verdade
   (`config/supabase-ca.pem`). Tem `pool.on('error', ...)` (obrigatório —
-  ver seção "Instabilidade intermitente" abaixo) e `idleTimeoutMillis:
+  ver seção "Instabilidade intermitente" abaixo), `idleTimeoutMillis:
   30000` (30s, acima do padrão de 10s do `pg`, pra reduzir reconexões "a
-  frio")
+  frio") e `max: config.poolMax` (env `DB_POOL_MAX`, default 10 — ver
+  seção "Auditoria de escala" abaixo sobre por que isso multiplica por
+  instância ao escalar horizontalmente)
 - `middleware/auth.js` → `autenticar` (valida JWT + revalida contra o
   banco a cada request, com guarda de UUID e retry — ver seção
   "Instabilidade intermitente"), `autorizar(papeis...)`, e os helpers de
@@ -146,6 +148,66 @@ pooler — isso aconteceu nesta sessão. Preferir testes leves (uma
 requisição de cada vez, espaçadas) ao investigar esse sintoma
 especificamente.
 
+## Auditoria de escala (25/07/2026)
+
+Segunda rodada de auditoria, diferente da de 24/07 (focada em
+vulnerabilidades críticas) — essa foi motivada pelo usuário querer escalar
+para mais associações-cliente e pedir que não haja falhas, nem de
+aplicação nem de segurança. Achados corrigidos (commits `8040bbf` e
+`1dfe16a`):
+
+- **`trust proxy` ausente** — o Render fica na frente do app como proxy
+  reverso (1 hop). Sem `app.set('trust proxy', 1)` em `server.js`, o
+  `express-rate-limit` via o IP interno do proxy pra todo mundo, ou seja,
+  o limite de tentativas de login (`limiteLogin`, 10/15min) era
+  **compartilhado entre todos os clientes** em vez de por IP de verdade —
+  um usuário errando a senha algumas vezes podia bloquear o login de
+  todo mundo. Corrigido.
+- **Pool sem tamanho explícito** — `db.js` usava o padrão implícito de 10
+  conexões do `pg`. Agora é `max: config.poolMax` (env `DB_POOL_MAX`,
+  default 10, sem mudar nada hoje). Importante pra quando for escalar:
+  **toda rota usa uma conexão dedicada do pool** (`pool.connect()` via
+  `comConexaoTenant`/`comConexaoSuperAdmin`/`comConexaoAuth`), nunca
+  `pool.query()`, porque o isolamento por RLS depende de `SET` de sessão
+  (por conexão). Isso significa que escalar para N instâncias no Render
+  multiplica o total de conexões no Session Pooler do Supabase por
+  `N × DB_POOL_MAX` — **conferir o limite de conexões do plano do
+  Supabase antes de aumentar o número de instâncias**, senão o sintoma na
+  hora do pico é erro de "too many connections" batendo em vários
+  clientes ao mesmo tempo.
+- **Rate limit geral** (`limiteGeral`, 300 req/15min por IP, em
+  `middleware/rateLimiter.js`) aplicado a toda a API em `server.js`,
+  antes de `express.json()` de propósito (rejeita rajada antes de gastar
+  tempo com parse de corpo grande). Antes só login/redefinição de senha
+  tinham algum limite — o resto das ~25 rotas (incluindo
+  `/auth/esqueci-senha`, pública) não tinha proteção nenhuma contra
+  rajadas.
+- **bcrypt fora da conexão emprestada do pool** — `bcrypt.hash`/`compare`
+  é deliberadamente lento (~50-100ms de CPU) e antes rodava com uma
+  conexão do pool já emprestada (às vezes com transação aberta via
+  `BEGIN`), segurando-a mais tempo que o necessário sob carga
+  concorrente. Movido para antes de abrir a conexão em:
+  `POST /associados`, `POST /usuarios`, `POST /superadmin/associacoes`,
+  `PATCH /superadmin/associacoes/:id/resetar-senha-admin`,
+  `POST /auth/redefinir-senha` (senha nova é gerada/hasheada sem
+  depender do token ser válido). `PUT /auth/senha` é o único caso que
+  precisa mesmo ler o hash atual do banco antes de poder comparar — ali
+  a solução foi usar **duas conexões separadas** (lê e libera, depois
+  compara/hasheia, depois abre outra pra escrever).
+
+Testado localmente contra produção (associação + usuário de teste criados
+via `pool.connect()` + `set_config('app.superadmin_bypass', ...)`, todos
+os fluxos afetados testados via `curl`, depois removidos com `DELETE FROM
+associacoes WHERE nome = 'TESTE_AUDITORIA_TEMP'`) antes do deploy.
+
+**Pendências identificadas, prioridade menor** (não implementadas ainda):
+sem `helmet`/cabeçalhos de segurança (`X-Powered-By: Express` vazando);
+sem paginação em `/associados`/`/cobrancas`; toda requisição autenticada
+faz uma query extra pra revalidar o token (dá pra cachear em memória por
+poucos segundos sem perder a revogação quase-imediata); fotos/comprovantes
+em base64 dentro do Postgres (`foto_base64`, `comprovante_base64`,
+`logo_base64`) — migrar pra Supabase Storage/S3 evita dor ao crescer.
+
 ## Isolamento entre tenants (RLS) — já está ativo
 
 Não é só disciplina de código (`WHERE associacao_id = $1` em toda query,
@@ -181,3 +243,5 @@ de teste, admin de um não conseguia ver dado do outro.
 `DATABASE_URL`, `JWT_SECRET`, `CORS_ORIGINS` — servidor derruba na
 inicialização se faltar alguma (ver `config/env.js`). `BOOTSTRAP_SECRET`
 é opcional (rota de bootstrap fica bloqueada por padrão sem ela).
+`DB_POOL_MAX` também é opcional (default 10) — ver seção "Auditoria de
+escala" acima antes de mudar ao escalar para mais instâncias.
