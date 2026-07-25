@@ -56,7 +56,7 @@ Isolamento entre associações garantido em duas camadas independentes: filtro e
 - Autocadastro público de associações foi **removido** — só o super-admin cria novas associações
 
 ### 4.2 Admin / Diretoria da associação
-- **Associados**: cadastro já pede e-mail e cria o login junto (senha provisória automática, exibida uma vez), CRUD completo, validação de CPF (dígito verificador), busca e filtro por status, KPIs clicáveis
+- **Associados**: cadastro já pede e-mail e cria o login junto (senha provisória automática, exibida uma vez), CRUD completo, validação de CPF (dígito verificador), busca e filtro por status, KPIs clicáveis. Mini-dashboard (24/07/2026): KPI "Novos (7 dias)" + gráfico de novos associados por dia na última semana — calculado no front-end a partir de `data_ingresso`, sem rota nova
 - **Financeiro**: cobranças com Pix estático (QR code real + "copia e cola", sem gateway externo), upload de comprovante pelo associado, confirmação manual pelo admin, estorno de pagamento, edição/exclusão, alerta de vencimento configurável (dias de antecedência)
 - **Comunicados**: mural com busca, filtro por status, agendamento de publicação, destaque, contagem de visualizações
 - **Usuários**: convite de novos usuários (diretoria/associado) com senha provisória automática, vínculo de login a um cadastro de associado específico, edição de papel, desativação (corta acesso imediatamente, mesmo com token válido), exclusão
