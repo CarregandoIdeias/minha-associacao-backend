@@ -22,4 +22,16 @@ const limiteRedefinicao = rateLimit({
     message: { erro: 'Muitas tentativas. Aguarde alguns minutos antes de tentar de novo.' }
 });
 
-module.exports = { limiteLogin, limiteRedefinicao };
+// Limite geral, aplicado a toda a API (server.js) -- as rotas de negócio
+// nunca tinham limite nenhum antes disso. Generoso o bastante pra não
+// atrapalhar uso real (um dashboard carregando várias abas facilmente soma
+// dezenas de chamadas), mas corta rajadas de cliente com bug ou abuso.
+const limiteGeral = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 300,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { erro: 'Muitas requisições. Aguarde alguns minutos antes de tentar de novo.' }
+});
+
+module.exports = { limiteLogin, limiteRedefinicao, limiteGeral };

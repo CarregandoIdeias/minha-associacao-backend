@@ -48,12 +48,16 @@ router.post('/', autorizar('admin', 'diretoria'), async (req, res) => {
         return res.status(400).json({ erro: 'e-mail válido é obrigatório' });
     }
 
+    // Gerado/hasheado antes de pegar a conexão -- bcrypt é deliberadamente
+    // lento (~50-100ms de CPU) e não depende de nada do banco; fazer isso
+    // com uma conexão do pool já emprestada (e uma transação já aberta)
+    // seguraria essa conexão por mais tempo que o necessário sob carga.
+    const senhaProvisoria = gerarSenhaProvisoria();
+    const senhaHash = await bcrypt.hash(senhaProvisoria, 10);
+
     const client = await comConexaoTenant(req.usuario.associacao_id);
     try {
         await client.query('BEGIN');
-
-        const senhaProvisoria = gerarSenhaProvisoria();
-        const senhaHash = await bcrypt.hash(senhaProvisoria, 10);
 
         const usuario = await client.query(
             `INSERT INTO usuarios (associacao_id, nome, email, senha_hash, papel, deve_trocar_senha)

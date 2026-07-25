@@ -50,12 +50,14 @@ router.post('/', autorizar('admin'), async (req, res) => {
         return res.status(400).json({ erro: 'associado_id é obrigatório para o papel "associado"' });
     }
 
+    // Gerado/hasheado antes de pegar a conexão -- ver mesmo comentário em
+    // routes/associados.js (POST /).
+    const senhaProvisoria = gerarSenhaProvisoria();
+    const senhaHash = await bcrypt.hash(senhaProvisoria, 10);
+
     const client = await comConexaoTenant(req.usuario.associacao_id);
     try {
         await client.query('BEGIN');
-
-        const senhaProvisoria = gerarSenhaProvisoria();
-        const senhaHash = await bcrypt.hash(senhaProvisoria, 10);
 
         const resultado = await client.query(
             `INSERT INTO usuarios (associacao_id, nome, email, senha_hash, papel, deve_trocar_senha)

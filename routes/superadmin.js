@@ -253,10 +253,11 @@ router.get('/associacoes/:id/cobrancas', async (req, res) => {
 router.patch('/associacoes/:id/resetar-senha-admin', async (req, res) => {
     const { id } = req.params;
 
+    const senhaProvisoria = gerarSenhaProvisoria();
+    const senhaHash = await bcrypt.hash(senhaProvisoria, 10);
+
     const client = await comConexaoSuperAdmin();
     try {
-        const senhaProvisoria = gerarSenhaProvisoria();
-        const senhaHash = await bcrypt.hash(senhaProvisoria, 10);
         const resultado = await client.query(
             `UPDATE usuarios SET senha_hash = $1, deve_trocar_senha = true
              WHERE associacao_id = $2 AND papel = 'admin'
@@ -420,6 +421,11 @@ router.post('/associacoes', async (req, res) => {
         return res.status(400).json({ erro: 'forma_cobranca inválida' });
     }
 
+    // Gerado/hasheado antes de pegar a conexão -- ver comentário equivalente
+    // em routes/associados.js (POST /).
+    const senhaProvisoria = gerarSenhaProvisoria();
+    const senhaHash = await bcrypt.hash(senhaProvisoria, 10);
+
     const client = await comConexaoSuperAdmin();
     try {
         await client.query('BEGIN');
@@ -433,9 +439,6 @@ router.post('/associacoes', async (req, res) => {
                 plano || 'trial', valor_mensalidade_manual || null, vencimento_assinatura || null, forma_cobranca || null]
         );
         const associacaoId = associacao.rows[0].id;
-
-        const senhaProvisoria = gerarSenhaProvisoria();
-        const senhaHash = await bcrypt.hash(senhaProvisoria, 10);
 
         const usuario = await client.query(
             `INSERT INTO usuarios (associacao_id, nome, email, senha_hash, papel, deve_trocar_senha, cpf)

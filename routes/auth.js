@@ -152,6 +152,10 @@ router.post('/redefinir-senha', limiteRedefinicao, async (req, res) => {
     }
 
     const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+    // Hasheado antes de pegar a conexão -- bcrypt não depende do token ser
+    // válido; fazer isso antes evita segurar a conexão/transação durante os
+    // ~50-100ms de CPU do hash (mesmo raciocínio de routes/associados.js).
+    const senhaHash = await bcrypt.hash(senha_nova, 10);
 
     const client = await comConexaoAuth();
     try {
@@ -170,8 +174,6 @@ router.post('/redefinir-senha', limiteRedefinicao, async (req, res) => {
             await client.query('ROLLBACK');
             return res.status(400).json({ erro: 'Link de redefinição inválido ou expirado' });
         }
-
-        const senhaHash = await bcrypt.hash(senha_nova, 10);
 
         await client.query(
             `UPDATE usuarios SET senha_hash = $1, deve_trocar_senha = false WHERE id = $2`,
@@ -214,40 +216,54 @@ router.put('/senha', autenticar, async (req, res) => {
         return res.status(400).json({ erro: 'A nova senha deve ter ao menos 8 caracteres, com letra maiúscula, minúscula e número' });
     }
 
-    const client = await comConexaoTenant(req.usuario.associacao_id);
     try {
-        const resultado = await client.query(`SELECT senha_hash FROM usuarios WHERE id = $1`, [req.usuario.id]);
-        const usuario = resultado.rows[0];
-        if (!usuario) {
-            return res.status(404).json({ erro: 'Usuário não encontrado' });
+        // Busca o hash atual com uma conexão dedicada, já liberada antes do
+        // bcrypt.compare/hash (deliberadamente lentos, ~50-100ms de CPU cada
+        // um) -- evita segurar uma conexão do pool emprestada durante esse
+        // tempo (mesmo raciocínio de routes/associados.js).
+        const clienteLeitura = await comConexaoTenant(req.usuario.associacao_id);
+        let senhaHashAtual;
+        try {
+            const resultado = await clienteLeitura.query(`SELECT senha_hash FROM usuarios WHERE id = $1`, [req.usuario.id]);
+            const usuario = resultado.rows[0];
+            if (!usuario) {
+                return res.status(404).json({ erro: 'Usuário não encontrado' });
+            }
+            senhaHashAtual = usuario.senha_hash;
+        } finally {
+            clienteLeitura.release();
         }
 
-        const senhaCorreta = await bcrypt.compare(senha_atual, usuario.senha_hash);
+        const senhaCorreta = await bcrypt.compare(senha_atual, senhaHashAtual);
         if (!senhaCorreta) {
             return res.status(401).json({ erro: 'Senha atual incorreta' });
         }
 
         const novoHash = await bcrypt.hash(senha_nova, 10);
-        await client.query(
-            `UPDATE usuarios SET senha_hash = $1, deve_trocar_senha = false WHERE id = $2`,
-            [novoHash, req.usuario.id]
-        );
 
-        await registrarEventoAuth(client, {
-            usuarioId: req.usuario.id,
-            associacaoId: req.usuario.associacao_id,
-            emailTentado: req.usuario.email,
-            evento: 'senha_alterada',
-            req,
-        });
+        const clienteEscrita = await comConexaoTenant(req.usuario.associacao_id);
+        try {
+            await clienteEscrita.query(
+                `UPDATE usuarios SET senha_hash = $1, deve_trocar_senha = false WHERE id = $2`,
+                [novoHash, req.usuario.id]
+            );
+
+            await registrarEventoAuth(clienteEscrita, {
+                usuarioId: req.usuario.id,
+                associacaoId: req.usuario.associacao_id,
+                emailTentado: req.usuario.email,
+                evento: 'senha_alterada',
+                req,
+            });
+        } finally {
+            clienteEscrita.release();
+        }
 
         const novoToken = assinarToken({ ...req.usuario, deve_trocar_senha: false });
         res.json({ ok: true, token: novoToken });
     } catch (err) {
         console.error(err);
         res.status(500).json({ erro: 'Erro ao trocar senha' });
-    } finally {
-        client.release();
     }
 });
 
