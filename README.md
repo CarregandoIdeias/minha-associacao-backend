@@ -47,9 +47,10 @@ Isolamento entre associações garantido em duas camadas independentes: filtro e
 
 ### 4.1 Super Admin
 - Login próprio (e-mail + senha), separado do sistema das associações
-- Dashboard: saudação personalizada, KPIs (associações, associados, receita mensal, mensalidades vencidas, ativas/bloqueadas), gráficos de crescimento (associações e novos associados, últimos 7 meses)
-- CRUD de associações, com filtros (nome, cidade, plano, status)
-- Ao criar uma associação, informa só nome do admin + e-mail principal (que já é o login) — senha provisória é gerada automaticamente e exibida uma única vez
+- **Dashboard reformulado** (24/07/2026): 7 KPIs (associações, associados, **MRR**, mensalidades vencendo, ativas, bloqueadas, atrasadas agregadas), 4 gráficos Chart.js (crescimento 12 meses, novos associados 12 meses, receita recebida histórica, distribuição por plano), tabela de últimas associações, painel de alertas em tempo real (vencimentos, clientes novos, mensalidades atrasadas). Alertas gerados via regras no backend: assinatura vencida (comparação com hoje), vencendo (dentro da janela `dias_alerta_vencimento` de cada associação), criada nos últimos 7 dias, mensalidade em atraso.
+- **Plano contratado + cobrança** (novo): cada associação escolhe um plano (trial/basico/profissional/enterprise) com preço-base + preço por associado ativo. MRR calculado automaticamente pela fórmula em `utils/precos.js`; campo `valor_mensalidade_manual` permite sobrescrever manualmente (negociações customizadas). Forma de cobrança (pix/boleto/cartão/dinheiro/outro) e data de vencimento da assinatura são configuráveis.
+- CRUD de associações, com filtros (nome, cidade, UF, plano, status da assinatura)
+- Ao criar uma associação, formulário estendido: dados básicos (nome, tipo, CNPJ, email, telefone, endereço) + dados de cadastro (CEP, site, logo em base64) + plano/cobrança + CPF do admin responsável. Senha provisória é gerada automaticamente e exibida uma única vez.
 - Tela de detalhe por associação, com abas: Informações, Usuário (+ gerar senha provisória nova para o admin), Financeiro (recebido/a receber/próximo vencimento), Associados (só-leitura), Cobranças (só-leitura), Configurações
 - Bloquear uma associação (`ativo = false`) impede login de todos os usuários dela imediatamente
 - Autocadastro público de associações foi **removido** — só o super-admin cria novas associações
@@ -78,7 +79,7 @@ Isolamento entre associações garantido em duas camadas independentes: filtro e
 | Recurso | Rotas |
 |---|---|
 | Autenticação (associação) | `POST /auth/login`, `POST /auth/esqueci-senha`, `POST /auth/redefinir-senha`, `PUT /auth/senha`, `POST /auth/logout` |
-| Super Admin | `POST /superadmin/bootstrap` (exige `BOOTSTRAP_SECRET`), `POST /superadmin/login`, `GET/POST/PUT/DELETE /superadmin/associacoes`, `GET /superadmin/associacoes/:id`, `GET /superadmin/associacoes/:id/associados`, `GET /superadmin/associacoes/:id/cobrancas`, `PATCH /superadmin/associacoes/:id/resetar-senha-admin`, `GET /superadmin/dashboard` |
+| Super Admin | `POST /superadmin/bootstrap` (exige `BOOTSTRAP_SECRET`), `POST /superadmin/login`, `GET/POST/PUT/DELETE /superadmin/associacoes`, `GET /superadmin/associacoes/:id`, `GET /superadmin/associacoes/:id/associados`, `GET /superadmin/associacoes/:id/cobrancas`, `PATCH /superadmin/associacoes/:id/resetar-senha-admin`, `GET /superadmin/dashboard` (retorna: KPIs, gráficos históricos 12mo, alertas, distribuição de planos, últimas associações) |
 | Associados | `GET/POST/PUT/DELETE /associados` (POST já cria o login junto) |
 | Financeiro | `GET/POST/PUT/DELETE /cobrancas`, `PATCH /cobrancas/:id/pagar`, `PATCH /cobrancas/:id/estornar`, `GET /cobrancas/:id/comprovante` |
 | Comunicados | `GET/POST/PUT/DELETE /comunicados`, `POST /comunicados/:id/marcar-lido` |
@@ -130,7 +131,43 @@ Substituiu o login por código/ID da associação. E-mail é único em toda a pl
 - Sem testes automatizados, principalmente de isolamento entre tenants
 - Sem ferramenta de migração automatizada (migrations são `.sql` avulsos, aplicados manualmente — ver `supabase/README.md`)
 
-## 7. Variáveis de ambiente (backend)
+## 7. Cálculo de MRR e preços por plano
+
+Novo arquivo `backend/utils/precos.js` (24/07/2026) centraliza a tabela de preços
+e a lógica de cálculo de mensalidade para toda a plataforma. Cada plano tem um
+preço-base + um preço por associado ativo:
+
+```js
+const PRECOS_PLANO = {
+  trial:        { base: 0,     porAssociado: 0 },
+  basico:       { base: 49.90, porAssociado: 2.00 },
+  profissional: { base: 99.90, porAssociado: 1.50 },
+  enterprise:   { base: 199.90, porAssociado: 1.00 },
+};
+```
+
+A função `calcularValorMensalidade(plano, totalAssociados, valorManual)` retorna:
+- Se `valorManual != null`: retorna o override manual (negociação customizada)
+- Senão: `base + porAssociado * totalAssociados`
+
+Usado em:
+- `GET /superadmin/dashboard` — soma o MRR de todas as associações ativas para o KPI
+- `GET /superadmin/associacoes` — mapeia o valor da mensalidade para cada linha da tabela
+- `POST/PUT /superadmin/associacoes/:id` — calcula e valida o valor ao criar/editar
+
+O `statusAssinatura(associacao, hoje)` também fica neste arquivo — calcula a situação
+da assinatura (bloqueada/trial/vencida/vencendo/ativa) a partir dos campos gravados
+(`ativo`, `plano`, `vencimento_assinatura`, `dias_alerta_vencimento`), mas **não é
+armazenado em coluna** — sempre calculado fresco para evitar dessincronização. Ver
+comentário no arquivo para a lógica completa.
+
+Esses valores de preço são **placeholders** — ajustáveis com o usuário (Julião)
+conforme necessário. Qualquer mudança nos preços é feita editando o arquivo,
+commitando, e fazendo deploy — as associações recalculam o MRR automaticamente
+na próxima requisição (o histórico de receita recebida, que fica em `pagamentos`,
+não é afetado).
+
+## 8. Variáveis de ambiente (backend)
 
 ```
 DATABASE_URL=<connection string do Supabase — Session Pooler, usuário app_runtime>
@@ -143,7 +180,7 @@ BOOTSTRAP_SECRET=<segredo forte, usado só para criar o primeiro super-admin>
 
 Em produção, o servidor recusa subir se `DATABASE_URL`, `JWT_SECRET` ou `CORS_ORIGINS` estiverem faltando. `BOOTSTRAP_SECRET` é opcional — se faltar, a rota de bootstrap fica sempre bloqueada (falha segura), não derruba o servidor.
 
-## 8. Pendências conhecidas / roadmap
+## 9. Pendências conhecidas / roadmap
 
 - Reordenar menu do associado (Meus Dados como página inicial)
 - Saudação personalizada no cabeçalho do painel da associação (já existe no Super Admin)
@@ -154,7 +191,7 @@ Em produção, o servidor recusa subir se `DATABASE_URL`, `JWT_SECRET` ou `CORS_
 - Envio de e-mail transacional (senha provisória, recuperação de senha por e-mail depende disso)
 - Itens que dependem de serviço externo, tratados como projetos futuros separados: WhatsApp API, 2FA, backups automáticos, Central de Suporte, integrações de pagamento adicionais (Mercado Pago, Stripe)
 
-## 9. Convenções do projeto
+## 10. Convenções do projeto
 
 - Todo o frontend é HTML/CSS/JS puro, sem build step — arquivos são editados e publicados diretamente
 - Migrações de banco são scripts `.sql` avulsos em `supabase/migrations/`, nomeados por timestamp, aplicados manualmente (não há ferramenta de migração automatizada) — ver `supabase/README.md` para o processo

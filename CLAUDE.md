@@ -40,6 +40,21 @@ documenta um incidente real causado por não seguir essa ordem.
   `super_admins`, que não tem RLS)
 - `supabase/migrations/*.sql` → schema, aplicado manualmente (sem
   ferramenta automatizada) — ver `supabase/README.md`
+- `utils/precos.js` (novo, 24/07/2026) → tabela de preços por plano e
+  cálculo de MRR (receita mensal recorrente), reutilizado por todas as
+  rotas que precisam calcular valor da mensalidade
+
+## Super Admin — mudanças recentes (24/07/2026)
+
+Reformulação completa trazendo conceitos de SaaS multi-tenant real:
+
+- **Novo:** campos de plano/cobrança em `associacoes`: `plano` (enum trial/basico/profissional/enterprise), `valor_mensalidade_manual` (override de negociação), `vencimento_assinatura` (data), `forma_cobranca` (método), `cep`, `site`. Nova coluna em `usuarios`: `cpf`.
+- **Novo:** `GET /superadmin/dashboard` retorna muito mais — KPIs com MRR, gráficos de crescimento/receita/distribuição (12 meses), alertas gerados por regras (vencimentos, clientes novos, mensalidades atrasadas).
+- **Modificado:** `GET /superadmin/associacoes` agora retorna `valor_mensalidade` calculado + `status_assinatura` derivado (bloqueada/trial/vencida/vencendo/ativa), coluna de responsável (nome do admin), CPF.
+- **Modificado:** `POST/PUT /superadmin/associacoes/:id` aceitam os novos campos.
+- **Novo:** `utils/precos.js` com `calcularValorMensalidade()` (base + per-associate) e `statusAssinatura()` (derivado, nunca armazenado).
+
+Esses valores de preço em `PRECOS_PLANO` são placeholders — revisar com o usuário (Julião) antes de considerar definitivos. Migration `20260724100000_plano_e_dados_associacao.sql` foi aditiva (todas colunas nullable, segura).
 
 ## Isolamento entre tenants (RLS) — já está ativo
 
