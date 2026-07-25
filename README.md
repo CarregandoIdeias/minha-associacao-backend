@@ -40,6 +40,7 @@ Plataforma SaaS para gestão de associações (moradores, classe profissional, e
 - `password_resets` — tokens de redefinição de senha (gerados por um admin para outra pessoa da associação)
 - `super_admins` — super-admins da plataforma (tabela separada do sistema multi-tenant, sem RLS — não tem coluna de tenant para isolar)
 - `auth_logs` — log de eventos de autenticação (login, logout, troca/redefinição de senha) por associação
+- `atividades` (novo, 25/07/2026) — log de atividades administrativas (associado cadastrado/editado, cobrança paga, comunicado publicado, usuário convidado), alimenta o card "Atividades recentes" do Dashboard do painel da associação
 
 Isolamento entre associações garantido em duas camadas independentes: filtro explícito `associacao_id = ...` em toda query da aplicação **e** Row Level Security forçada no Postgres (ver seção 6) — mesmo uma rota nova que esqueça o filtro não consegue ler dado de outro tenant.
 
@@ -56,7 +57,8 @@ Isolamento entre associações garantido em duas camadas independentes: filtro e
 - Autocadastro público de associações foi **removido** — só o super-admin cria novas associações
 
 ### 4.2 Admin / Diretoria da associação
-- **Associados**: cadastro já pede e-mail e cria o login junto (senha provisória automática, exibida uma vez), CRUD completo, validação de CPF (dígito verificador), busca e filtro por status, KPIs clicáveis. Mini-dashboard (24/07/2026): KPI "Novos (7 dias)" + gráfico de novos associados por dia na última semana — calculado no front-end a partir de `data_ingresso`, sem rota nova
+- **Dashboard** (reformulado 25/07/2026): tela inicial com 7 KPIs (total, ativos, novos no mês, inadimplentes, receita do mês, mensalidades vencidas, mensalidades a vencer — com comparativo vs. mês anterior), 4 gráficos Chart.js (crescimento acumulado 12 meses, novos associados por mês, receita mensal recebida vs. emitida, situação financeira em pizza), e 4 cards de apoio (atividades recentes, próximos vencimentos, últimos associados cadastrados, comunicados recentes). Tudo calculado no front-end a partir de `GET /associados` e `GET /cobrancas` (sem rota agregada nova), exceto atividades recentes, que vem de `GET /atividades`
+- **Associados**: cadastro já pede e-mail e cria o login junto (senha provisória automática, exibida uma vez), CRUD completo, validação de CPF (dígito verificador), busca e filtro por status, acessado direto pela sidebar (sem submenu, desde 25/07/2026)
 - **Financeiro**: cobranças com Pix estático (QR code real + "copia e cola", sem gateway externo), upload de comprovante pelo associado, confirmação manual pelo admin, estorno de pagamento, edição/exclusão, alerta de vencimento configurável (dias de antecedência)
 - **Comunicados**: mural com busca, filtro por status, agendamento de publicação, destaque, contagem de visualizações
 - **Usuários**: convite de novos usuários (diretoria/associado) com senha provisória automática, vínculo de login a um cadastro de associado específico, edição de papel, desativação (corta acesso imediatamente, mesmo com token válido), exclusão
@@ -83,6 +85,7 @@ Isolamento entre associações garantido em duas camadas independentes: filtro e
 | Associados | `GET/POST/PUT/DELETE /associados` (POST já cria o login junto) |
 | Financeiro | `GET/POST/PUT/DELETE /cobrancas`, `PATCH /cobrancas/:id/pagar`, `PATCH /cobrancas/:id/estornar`, `GET /cobrancas/:id/comprovante` |
 | Comunicados | `GET/POST/PUT/DELETE /comunicados`, `POST /comunicados/:id/marcar-lido` |
+| Atividades | `GET /atividades` (últimas ~15 da associação, alimenta o Dashboard) |
 | Usuários | `GET/POST/PUT/DELETE /usuarios`, `GET /usuarios/associados-sem-login`, `PATCH /usuarios/:id/desativar`, `POST /usuarios/:id/gerar-link-redefinicao`, `GET /usuarios/logs-autenticacao` |
 | Portal do associado | `GET /portal/meus-dados`, `PUT /portal/minha-foto`, `GET /portal/minhas-cobrancas`, `PUT /portal/minhas-cobrancas/:id/comprovante` |
 | Configurações | `GET/PUT /configuracoes/pix`, `GET/PUT /configuracoes/alertas` |
@@ -206,9 +209,8 @@ Em produção, o servidor recusa subir se `DATABASE_URL`, `JWT_SECRET` ou `CORS_
 
 ## 9. Pendências conhecidas / roadmap
 
-- Reordenar menu do associado (Meus Dados como página inicial) — pendente só para o papel associado; admin/diretoria já ganhou Dashboard como tela inicial em 25/07/2026
-- Saudação personalizada no cabeçalho do painel da associação (já existe no Super Admin)
-- Revisão geral de UX/UI do painel da associação — parcialmente feita em 25/07/2026 (Dashboard, submenu de Associados, menu hambúrguer responsivo, tela de Configurações reformulada); falta alinhar o restante das telas (Financeiro, Comunicados, Usuários) ao mesmo padrão visual mais moderno
+- Reordenar menu do associado (Meus Dados como página inicial) — pendente só para o papel associado; admin/diretoria já tem Dashboard como tela inicial desde 25/07/2026
+- Revisão geral de UX/UI do painel da associação — Dashboard, header (saudação/avatar/perfil), sidebar (sem submenu) e Meu Perfil reformulados em 25/07/2026; falta alinhar o restante das telas (Financeiro, Comunicados, Usuários, Configurações) ao mesmo padrão visual mais moderno
 - Integração real de pagamento (Pix via gateway — Asaas/Efí), hoje é confirmação manual
 - Comunicados em massa (Super Admin → várias associações) e Relatórios exportáveis
 - Usuários da plataforma com perfis (Super Admin, Suporte, Financeiro) e Configurações gerais

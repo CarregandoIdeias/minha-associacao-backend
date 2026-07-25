@@ -47,6 +47,10 @@ documenta um incidente real causado por não seguir essa ordem.
 - `utils/precos.js` (novo, 24/07/2026) → tabela de preços por plano e
   cálculo de MRR (receita mensal recorrente), reutilizado por todas as
   rotas que precisam calcular valor da mensalidade
+- `utils/atividadeLog.js` (novo, 25/07/2026) → `registrarAtividade()`,
+  espelha `authLog.js`, grava na tabela `atividades` (log de quem fez o
+  quê no painel da associação — não confundir com `auth_logs`, que é só
+  login/logout/troca de senha)
 
 ## Super Admin — mudanças recentes (24/07/2026)
 
@@ -59,6 +63,39 @@ Reformulação completa trazendo conceitos de SaaS multi-tenant real:
 - **Novo:** `utils/precos.js` com `calcularValorMensalidade()` (base + per-associate) e `statusAssinatura()` (derivado, nunca armazenado).
 
 Esses valores de preço em `PRECOS_PLANO` são placeholders — revisar com o usuário (Julião) antes de considerar definitivos. Migration `20260724100000_plano_e_dados_associacao.sql` foi aditiva (todas colunas nullable, segura).
+
+## Log de atividades para o Dashboard do painel da associação (25/07/2026)
+
+Nova tabela `atividades` (`supabase/migrations/20260725120000_atividades.sql`,
+aditiva, já nasce com `FORCE ROW LEVEL SECURITY` — tabela nova, sem ninguém
+dependendo do comportamento sem RLS, então não tem o risco de deploy que
+`FORCE` tem em tabela existente, ver seção RLS abaixo) alimenta o card
+"Atividades recentes" do Dashboard reformado em `painel/index.html`.
+
+- `utils/atividadeLog.js` (`registrarAtividade`) é chamado logo após o
+  insert/update principal em: `POST/PUT /associados`, `PATCH
+  /cobrancas/:id/pagar`, `POST /comunicados`, `POST /usuarios`. Cada
+  chamada grava `descricao` já pronta em texto (ex. "cadastrou o associado
+  Fulano") — não guarda um monte de campos estruturados pra montar a frase
+  depois, é `usuario_nome` (snapshot) + `descricao` (texto).
+- `middleware/auth.js` (`autenticar`) passou a buscar `u.nome` junto com
+  `papel` na revalidação por request e anexar em `req.usuario.nome` —
+  antes só existia `id/associacao_id/papel/email/deve_trocar_senha` (do
+  JWT). Precisa disso pra saber "quem" registrar em cada atividade sem uma
+  query extra em cada rota.
+- Nova rota `GET /atividades` (`routes/atividades.js`, admin/diretoria):
+  últimas ~15 da associação, mais recente primeiro.
+- `GET /cobrancas` ganhou `p.pago_em` (LEFT JOIN `pagamentos`) — usado pelo
+  Dashboard pra separar "Receitas" (por mês de vencimento) de "Pagamentos
+  recebidos" (por mês de recebimento real) no gráfico de receita mensal.
+
+**Migrations continuam só manuais, e por um motivo mais forte do que
+"falta de tooling"**: a `DATABASE_URL` (local e produção) conecta como
+`app_runtime`, que **não tem privilégio de DDL** (só
+`SELECT/INSERT/UPDATE/DELETE`, por desenho). Um script Node local usando
+`db.js` pra rodar uma migration nova falha com `permission denied for
+schema public` — precisa colar o SQL no SQL Editor do Supabase (dono
+`postgres`), como `supabase/README.md` já orienta.
 
 ## Conexão com o banco — usar sempre o Session Pooler do Supabase (25/07/2026)
 
