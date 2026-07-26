@@ -5,13 +5,14 @@ const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const pool = require('../db');
 const config = require('../config/env');
-const { autenticarSuperAdmin, comConexaoSuperAdmin } = require('../middleware/auth');
+const { autenticarSuperAdmin, autorizarSuperAdmin, comConexaoSuperAdmin } = require('../middleware/auth');
 const { limiteLogin } = require('../middleware/rateLimiter');
-const { emailValido, gerarSenhaProvisoria, cpfValido } = require('../utils/validacao');
+const { emailValido, gerarSenhaProvisoria, cpfValido, senhaForte } = require('../utils/validacao');
 const { registrarEventoAuth } = require('../utils/authLog');
 const { calcularValorMensalidade, statusAssinatura } = require('../utils/precos');
 
 const FORMAS_COBRANCA_VALIDAS = ['pix', 'boleto', 'cartao', 'dinheiro', 'outro'];
+const PAPEIS_SUPERADMIN_VALIDOS = ['super_admin', 'administrador', 'suporte'];
 
 const router = express.Router();
 const JWT_SECRET = config.jwtSecret;
@@ -76,11 +77,11 @@ router.post('/login', limiteLogin, async (req, res) => {
 
     try {
         const resultado = await pool.query(
-            `SELECT id, nome, email, senha_hash FROM super_admins WHERE email = $1`,
+            `SELECT id, nome, email, senha_hash, papel, ativo, deve_trocar_senha FROM super_admins WHERE email = $1`,
             [email]
         );
         const admin = resultado.rows[0];
-        if (!admin) {
+        if (!admin || !admin.ativo) {
             return res.status(401).json({ erro: 'Credenciais inválidas' });
         }
 
@@ -95,7 +96,13 @@ router.post('/login', limiteLogin, async (req, res) => {
             { expiresIn: '8h' }
         );
 
-        res.json({ token, nome: admin.nome });
+        res.json({
+            token,
+            id: admin.id,
+            nome: admin.nome,
+            papel: admin.papel,
+            deve_trocar_senha: admin.deve_trocar_senha,
+        });
     } catch (err) {
         console.error(err);
         res.status(500).json({ erro: 'Erro ao autenticar' });
@@ -104,6 +111,197 @@ router.post('/login', limiteLogin, async (req, res) => {
 
 // A partir daqui, todas as rotas exigem token de super-admin
 router.use(autenticarSuperAdmin);
+
+// ---------- Gerenciamento de administradores da plataforma ----------
+// Restrito a quem tem papel 'super_admin' -- administrador/suporte são
+// níveis mais baixos, preparados para restrições futuras.
+
+// GET /superadmin/admins — lista os administradores da plataforma
+router.get('/admins', autorizarSuperAdmin('super_admin'), async (req, res) => {
+    try {
+        const resultado = await pool.query(
+            `SELECT id, nome, email, papel, ativo, criado_em FROM super_admins ORDER BY criado_em DESC`
+        );
+        res.json(resultado.rows);
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ erro: 'Erro ao listar administradores' });
+    }
+});
+
+// POST /superadmin/admins — cria um novo administrador da plataforma, com
+// senha provisória (mesmo padrão de usuarios/associações: exibida uma única
+// vez, troca obrigatória no primeiro login).
+router.post('/admins', autorizarSuperAdmin('super_admin'), async (req, res) => {
+    const { nome, email, papel } = req.body;
+
+    if (!nome || !nome.trim() || !email) {
+        return res.status(400).json({ erro: 'nome e email são obrigatórios' });
+    }
+    if (!emailValido(email)) {
+        return res.status(400).json({ erro: 'e-mail inválido' });
+    }
+    if (papel && !PAPEIS_SUPERADMIN_VALIDOS.includes(papel)) {
+        return res.status(400).json({ erro: 'papel inválido' });
+    }
+
+    const senhaProvisoria = gerarSenhaProvisoria();
+    const senhaHash = await bcrypt.hash(senhaProvisoria, 10);
+
+    try {
+        const resultado = await pool.query(
+            `INSERT INTO super_admins (nome, email, senha_hash, papel, deve_trocar_senha)
+             VALUES ($1, $2, $3, $4, true) RETURNING id, nome, email, papel, ativo, criado_em`,
+            [nome.trim(), email, senhaHash, papel || 'administrador']
+        );
+        res.status(201).json({ admin: resultado.rows[0], senha_provisoria: senhaProvisoria });
+    } catch (err) {
+        if (err.code === '23505') {
+            return res.status(409).json({ erro: 'Já existe um administrador com esse e-mail' });
+        }
+        console.error(err);
+        res.status(500).json({ erro: 'Erro ao criar administrador' });
+    }
+});
+
+// PUT /superadmin/admins/:id — edita nome/e-mail/papel de um administrador
+router.put('/admins/:id', autorizarSuperAdmin('super_admin'), async (req, res) => {
+    const { id } = req.params;
+    const { nome, email, papel } = req.body;
+
+    if (!nome || !nome.trim()) {
+        return res.status(400).json({ erro: 'nome é obrigatório' });
+    }
+    if (email && !emailValido(email)) {
+        return res.status(400).json({ erro: 'e-mail inválido' });
+    }
+    if (papel && !PAPEIS_SUPERADMIN_VALIDOS.includes(papel)) {
+        return res.status(400).json({ erro: 'papel inválido' });
+    }
+    if (papel && id === req.superAdmin.id && papel !== req.superAdmin.papel) {
+        return res.status(400).json({ erro: 'Não é possível alterar o próprio nível de permissão' });
+    }
+
+    try {
+        const resultado = await pool.query(
+            `UPDATE super_admins SET nome = $1, email = COALESCE($2, email), papel = COALESCE($3, papel)
+             WHERE id = $4 RETURNING id, nome, email, papel, ativo, criado_em`,
+            [nome.trim(), email || null, papel || null, id]
+        );
+        if (resultado.rows.length === 0) {
+            return res.status(404).json({ erro: 'Administrador não encontrado' });
+        }
+        res.json(resultado.rows[0]);
+    } catch (err) {
+        if (err.code === '23505') {
+            return res.status(409).json({ erro: 'E-mail já cadastrado para outro administrador' });
+        }
+        console.error(err);
+        res.status(500).json({ erro: 'Erro ao editar administrador' });
+    }
+});
+
+// PATCH /superadmin/admins/:id/status — ativa/desativa um administrador.
+// Bloqueia desativar a própria conta e desativar o último super_admin ativo
+// (evitaria travar o acesso administrativo da plataforma inteira).
+router.patch('/admins/:id/status', autorizarSuperAdmin('super_admin'), async (req, res) => {
+    const { id } = req.params;
+    const { ativo } = req.body;
+
+    if (typeof ativo !== 'boolean') {
+        return res.status(400).json({ erro: 'ativo (boolean) é obrigatório' });
+    }
+    if (id === req.superAdmin.id && !ativo) {
+        return res.status(400).json({ erro: 'Não é possível desativar sua própria conta' });
+    }
+
+    try {
+        if (!ativo) {
+            const alvo = await pool.query(`SELECT papel FROM super_admins WHERE id = $1`, [id]);
+            if (alvo.rows.length === 0) {
+                return res.status(404).json({ erro: 'Administrador não encontrado' });
+            }
+            if (alvo.rows[0].papel === 'super_admin') {
+                const restantes = await pool.query(
+                    `SELECT COUNT(*) AS total FROM super_admins WHERE papel = 'super_admin' AND ativo = true AND id != $1`,
+                    [id]
+                );
+                if (parseInt(restantes.rows[0].total, 10) === 0) {
+                    return res.status(400).json({ erro: 'Não é possível desativar o único super-admin ativo da plataforma' });
+                }
+            }
+        }
+
+        const resultado = await pool.query(
+            `UPDATE super_admins SET ativo = $1 WHERE id = $2 RETURNING id, nome, email, papel, ativo`,
+            [ativo, id]
+        );
+        res.json(resultado.rows[0]);
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ erro: 'Erro ao alterar status do administrador' });
+    }
+});
+
+// PATCH /superadmin/admins/:id/senha — redefine a senha de outro administrador
+// (senha provisória gerada, exibida uma única vez, troca obrigatória no
+// próximo login -- mesmo padrão de resetar-senha-admin de associações)
+router.patch('/admins/:id/senha', autorizarSuperAdmin('super_admin'), async (req, res) => {
+    const { id } = req.params;
+    const senhaProvisoria = gerarSenhaProvisoria();
+    const senhaHash = await bcrypt.hash(senhaProvisoria, 10);
+
+    try {
+        const resultado = await pool.query(
+            `UPDATE super_admins SET senha_hash = $1, deve_trocar_senha = true WHERE id = $2 RETURNING id, email`,
+            [senhaHash, id]
+        );
+        if (resultado.rows.length === 0) {
+            return res.status(404).json({ erro: 'Administrador não encontrado' });
+        }
+        res.json({ ok: true, email: resultado.rows[0].email, senha_provisoria: senhaProvisoria });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ erro: 'Erro ao redefinir senha' });
+    }
+});
+
+// PUT /superadmin/perfil/senha — o próprio administrador troca sua senha
+// (qualquer nível de permissão pode usar essa rota para si mesmo)
+router.put('/perfil/senha', async (req, res) => {
+    const { senha_atual, senha_nova } = req.body;
+
+    if (!senha_atual || !senha_nova) {
+        return res.status(400).json({ erro: 'senha_atual e senha_nova são obrigatórios' });
+    }
+    if (!senhaForte(senha_nova)) {
+        return res.status(400).json({ erro: 'A nova senha deve ter ao menos 8 caracteres, com letra maiúscula, minúscula e número' });
+    }
+
+    try {
+        const resultado = await pool.query(`SELECT senha_hash FROM super_admins WHERE id = $1`, [req.superAdmin.id]);
+        const admin = resultado.rows[0];
+        if (!admin) {
+            return res.status(404).json({ erro: 'Administrador não encontrado' });
+        }
+
+        const senhaCorreta = await bcrypt.compare(senha_atual, admin.senha_hash);
+        if (!senhaCorreta) {
+            return res.status(401).json({ erro: 'Senha atual incorreta' });
+        }
+
+        const novoHash = await bcrypt.hash(senha_nova, 10);
+        await pool.query(
+            `UPDATE super_admins SET senha_hash = $1, deve_trocar_senha = false WHERE id = $2`,
+            [novoHash, req.superAdmin.id]
+        );
+
+        res.json({ ok: true });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ erro: 'Erro ao trocar senha' });
+    }
+});
 
 // GET /superadmin/associacoes — lista todas as associações com contadores agregados e filtros
 // Toca associados/cobrancas (têm RLS) -> usa conexão de bypass do super-admin

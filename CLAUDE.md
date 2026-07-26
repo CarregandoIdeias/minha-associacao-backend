@@ -208,6 +208,18 @@ poucos segundos sem perder a revogação quase-imediata); fotos/comprovantes
 em base64 dentro do Postgres (`foto_base64`, `comprovante_base64`,
 `logo_base64`) — migrar pra Supabase Storage/S3 evita dor ao crescer.
 
+## Gerenciamento de administradores da plataforma (Fase 1 da melhoria do Super Admin, 26/07/2026)
+
+`super_admins` ganhou `papel` (enum `papel_super_admin`: `super_admin`/`administrador`/`suporte`), `ativo` e `deve_trocar_senha` (migration `20260726090000_admins_papel_e_status.sql`, aditiva). `autenticarSuperAdmin` (middleware/auth.js) virou async e passou a revalidar `ativo`/`papel` a cada requisição — mesmo raciocínio de `autenticar()`, sem isso desativar um admin só valeria depois do token expirar (até 8h). Novo helper `autorizarSuperAdmin(...papeis)` restringe rotas por nível de permissão.
+
+Novas rotas em `routes/superadmin.js`, todas exigindo papel `super_admin` exceto a última:
+- `GET/POST/PUT /superadmin/admins`, `PATCH /superadmin/admins/:id/status` (ativar/desativar), `PATCH /superadmin/admins/:id/senha` (redefine senha de outro admin, senha provisória com troca obrigatória — mesmo padrão de `resetar-senha-admin`)
+- `PUT /superadmin/perfil/senha` — qualquer super-admin troca a própria senha (não exige papel específico)
+
+Guardas de segurança em `/admins/:id/status`: bloqueia desativar a própria conta e bloqueia desativar o último `super_admin` ativo da plataforma (evita lockout total). Edição (`PUT /admins/:id`) bloqueia um admin mudar o próprio papel. `POST /superadmin/login` agora checa `ativo`, retorna `id`/`papel`/`deve_trocar_senha`.
+
+Testado localmente contra produção (3 super-admins de teste criados via `pool.query` direto — `super_admins` não tem RLS —, todos os fluxos exercitados via curl e visualmente no `superadmin.html`, depois removidos com `DELETE FROM super_admins WHERE email IN (...)`).
+
 ## Isolamento entre tenants (RLS) — já está ativo
 
 Não é só disciplina de código (`WHERE associacao_id = $1` em toda query,

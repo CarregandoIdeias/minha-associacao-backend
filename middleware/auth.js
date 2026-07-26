@@ -108,8 +108,12 @@ async function comConexaoTenant(associacaoId) {
     return client; // lembrar de chamar client.release() depois de usar
 }
 
-// Verifica o token de SUPER-ADMIN (separado do login das associações)
-function autenticarSuperAdmin(req, res, next) {
+// Verifica o token de SUPER-ADMIN (separado do login das associações) e
+// revalida ativo/papel contra o banco a cada requisição -- sem isso,
+// desativar um administrador só valeria depois do token expirar (até 8h
+// depois), mesmo raciocínio de autenticar() acima. super_admins não tem RLS,
+// então pool.query direto é seguro aqui.
+async function autenticarSuperAdmin(req, res, next) {
     const header = req.headers.authorization;
     if (!header || !header.startsWith('Bearer ')) {
         return res.status(401).json({ erro: 'Token não fornecido' });
@@ -117,16 +121,48 @@ function autenticarSuperAdmin(req, res, next) {
 
     const token = header.split(' ')[1];
 
+    let payload;
     try {
-        const payload = jwt.verify(token, JWT_SECRET);
+        payload = jwt.verify(token, JWT_SECRET);
         if (payload.tipo !== 'superadmin') {
             return res.status(403).json({ erro: 'Acesso restrito ao super-admin' });
         }
-        req.superAdmin = payload; // { id, email, tipo }
-        next();
     } catch (err) {
         return res.status(401).json({ erro: 'Token inválido ou expirado' });
     }
+
+    if (!payload.id || !UUID_REGEX.test(payload.id)) {
+        return res.status(401).json({ erro: 'Token inválido ou expirado' });
+    }
+
+    try {
+        const resultado = await pool.query(
+            `SELECT nome, papel, ativo FROM super_admins WHERE id = $1`,
+            [payload.id]
+        );
+        const admin = resultado.rows[0];
+        if (!admin || !admin.ativo) {
+            return res.status(401).json({ erro: 'Token inválido ou expirado' });
+        }
+        // { id, email, tipo, papel, nome } -- papel/nome vêm frescos do banco,
+        // não do token, para uma troca de nível de permissão valer na hora.
+        req.superAdmin = { ...payload, papel: admin.papel, nome: admin.nome };
+        next();
+    } catch (err) {
+        console.error(err);
+        return res.status(500).json({ erro: 'Erro ao validar sessão' });
+    }
+}
+
+// Restringe rotas de gerenciamento de administradores a determinados níveis
+// de permissão. Uso: autorizarSuperAdmin('super_admin')
+function autorizarSuperAdmin(...papeisPermitidos) {
+    return (req, res, next) => {
+        if (!req.superAdmin || !papeisPermitidos.includes(req.superAdmin.papel)) {
+            return res.status(403).json({ erro: 'Acesso não permitido para esse nível de permissão' });
+        }
+        next();
+    };
 }
 
 // Abre uma conexão dedicada com o bypass explícito de RLS para o super-admin.
@@ -157,6 +193,7 @@ module.exports = {
     autorizar,
     comConexaoTenant,
     autenticarSuperAdmin,
+    autorizarSuperAdmin,
     comConexaoSuperAdmin,
     comConexaoAuth,
 };
