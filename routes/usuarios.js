@@ -6,6 +6,7 @@ const { autenticar, bloquearSenhaProvisoria, autorizar, comConexaoTenant } = req
 const { emailValido, gerarSenhaProvisoria } = require('../utils/validacao');
 const { registrarEventoAuth } = require('../utils/authLog');
 const { registrarAtividade } = require('../utils/atividadeLog');
+const { registrarLogAuditoria } = require('../utils/auditoria');
 
 const router = express.Router();
 router.use(autenticar);
@@ -92,6 +93,12 @@ router.post('/', autorizar('admin'), async (req, res) => {
             usuarioNome: req.usuario.nome,
             tipo: 'usuario_convidado',
             descricao: 'convidou ' + novoUsuario.nome + ' como ' + papel,
+        });
+        await registrarLogAuditoria(client, {
+            associacaoId: req.usuario.associacao_id, usuarioId: req.usuario.id, usuarioNome: req.usuario.nome, usuarioEmail: req.usuario.email,
+            modulo: 'usuarios', tipoAcao: 'criacao',
+            descricao: req.usuario.nome + ' convidou ' + novoUsuario.nome + ' como ' + papel,
+            dadosNovos: novoUsuario, req,
         });
 
         await client.query('COMMIT');
@@ -191,7 +198,19 @@ router.patch('/:id/desativar', autorizar('admin'), async (req, res) => {
 
     const client = await comConexaoTenant(req.usuario.associacao_id);
     try {
-        await client.query(`UPDATE usuarios SET ativo = false WHERE id = $1 AND associacao_id = $2`, [id, req.usuario.associacao_id]);
+        const resultado = await client.query(
+            `UPDATE usuarios SET ativo = false WHERE id = $1 AND associacao_id = $2 RETURNING id, nome`,
+            [id, req.usuario.associacao_id]
+        );
+        if (resultado.rows.length === 0) {
+            return res.status(404).json({ erro: 'Usuário não encontrado' });
+        }
+        await registrarLogAuditoria(client, {
+            associacaoId: req.usuario.associacao_id, usuarioId: req.usuario.id, usuarioNome: req.usuario.nome, usuarioEmail: req.usuario.email,
+            modulo: 'usuarios', tipoAcao: 'edicao',
+            descricao: req.usuario.nome + ' desativou o usuário ' + resultado.rows[0].nome,
+            dadosAnteriores: { ativo: true }, dadosNovos: { ativo: false }, req,
+        });
         res.json({ ok: true });
     } catch (err) {
         console.error(err);
@@ -218,15 +237,29 @@ router.put('/:id', autorizar('admin'), async (req, res) => {
 
     const client = await comConexaoTenant(req.usuario.associacao_id);
     try {
+        const anterior = await client.query(
+            `SELECT id, nome, papel FROM usuarios WHERE id = $1 AND associacao_id = $2`,
+            [id, req.usuario.associacao_id]
+        );
+        if (anterior.rows.length === 0) {
+            return res.status(404).json({ erro: 'Usuário não encontrado' });
+        }
+
         const resultado = await client.query(
             `UPDATE usuarios SET nome = $1, papel = COALESCE($2, papel)
              WHERE id = $3 AND associacao_id = $4
              RETURNING id, nome, email, papel, ativo, criado_em`,
             [nome.trim(), papel || null, id, req.usuario.associacao_id]
         );
-        if (resultado.rows.length === 0) {
-            return res.status(404).json({ erro: 'Usuário não encontrado' });
-        }
+
+        const mudouPapel = papel && papel !== anterior.rows[0].papel;
+        await registrarLogAuditoria(client, {
+            associacaoId: req.usuario.associacao_id, usuarioId: req.usuario.id, usuarioNome: req.usuario.nome, usuarioEmail: req.usuario.email,
+            modulo: 'usuarios', tipoAcao: mudouPapel ? 'alteracao_permissoes' : 'edicao',
+            descricao: req.usuario.nome + ' editou o usuário ' + resultado.rows[0].nome,
+            dadosAnteriores: anterior.rows[0], dadosNovos: resultado.rows[0], req,
+        });
+
         res.json(resultado.rows[0]);
     } catch (err) {
         console.error(err);
@@ -246,10 +279,19 @@ router.delete('/:id', autorizar('admin'), async (req, res) => {
 
     const client = await comConexaoTenant(req.usuario.associacao_id);
     try {
-        const resultado = await client.query(`DELETE FROM usuarios WHERE id = $1 AND associacao_id = $2 RETURNING id`, [id, req.usuario.associacao_id]);
+        const resultado = await client.query(
+            `DELETE FROM usuarios WHERE id = $1 AND associacao_id = $2 RETURNING id, nome, email, papel`,
+            [id, req.usuario.associacao_id]
+        );
         if (resultado.rows.length === 0) {
             return res.status(404).json({ erro: 'Usuário não encontrado' });
         }
+        await registrarLogAuditoria(client, {
+            associacaoId: req.usuario.associacao_id, usuarioId: req.usuario.id, usuarioNome: req.usuario.nome, usuarioEmail: req.usuario.email,
+            modulo: 'usuarios', tipoAcao: 'exclusao',
+            descricao: req.usuario.nome + ' excluiu o usuário ' + resultado.rows[0].nome,
+            dadosAnteriores: resultado.rows[0], req,
+        });
         res.json({ ok: true });
     } catch (err) {
         console.error(err);

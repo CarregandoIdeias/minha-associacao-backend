@@ -2,6 +2,7 @@
 const express = require('express');
 const { autenticar, bloquearSenhaProvisoria, autorizar, comConexaoTenant } = require('../middleware/auth');
 const { registrarAtividade } = require('../utils/atividadeLog');
+const { registrarLogAuditoria } = require('../utils/auditoria');
 
 const router = express.Router();
 router.use(autenticar);
@@ -96,6 +97,12 @@ router.post('/', autorizar('admin', 'diretoria'), async (req, res) => {
              RETURNING id, descricao, valor, vencimento, status`,
             [req.usuario.associacao_id, associado_id, descricao || 'Mensalidade', valor, vencimento]
         );
+        await registrarLogAuditoria(client, {
+            associacaoId: req.usuario.associacao_id, usuarioId: req.usuario.id, usuarioNome: req.usuario.nome, usuarioEmail: req.usuario.email,
+            modulo: 'cobrancas', tipoAcao: 'criacao',
+            descricao: req.usuario.nome + ' criou a cobrança "' + resultado.rows[0].descricao + '"',
+            dadosNovos: resultado.rows[0], req,
+        });
         res.status(201).json(resultado.rows[0]);
     } catch (err) {
         console.error(err);
@@ -149,6 +156,12 @@ router.patch('/:id/pagar', autorizar('admin', 'diretoria'), async (req, res) => 
             tipo: 'cobranca_paga',
             descricao: 'registrou o pagamento de ' + cobranca.rows[0].associado_nome,
         });
+        await registrarLogAuditoria(client, {
+            associacaoId: req.usuario.associacao_id, usuarioId: req.usuario.id, usuarioNome: req.usuario.nome, usuarioEmail: req.usuario.email,
+            modulo: 'cobrancas', tipoAcao: 'edicao',
+            descricao: req.usuario.nome + ' registrou o pagamento de ' + cobranca.rows[0].associado_nome,
+            dadosAnteriores: { status: cobranca.rows[0].status }, dadosNovos: { status: 'pago', metodo: metodo || 'outro' }, req,
+        });
 
         await client.query('COMMIT');
         res.json({ ok: true, id, status: 'pago' });
@@ -187,6 +200,13 @@ router.patch('/:id/estornar', autorizar('admin'), async (req, res) => {
              WHERE id = $1 AND associacao_id = $2`,
             [id, req.usuario.associacao_id]
         );
+
+        await registrarLogAuditoria(client, {
+            associacaoId: req.usuario.associacao_id, usuarioId: req.usuario.id, usuarioNome: req.usuario.nome, usuarioEmail: req.usuario.email,
+            modulo: 'cobrancas', tipoAcao: 'edicao',
+            descricao: req.usuario.nome + ' estornou o pagamento da cobrança',
+            dadosAnteriores: { status: 'pago' }, dadosNovos: { status: 'pendente' }, req,
+        });
 
         await client.query('COMMIT');
         res.json({ ok: true, id, status: 'pendente' });
@@ -235,7 +255,10 @@ router.put('/:id', autorizar('admin', 'diretoria'), async (req, res) => {
 
     const client = await comConexaoTenant(req.usuario.associacao_id);
     try {
-        const atual = await client.query(`SELECT status FROM cobrancas WHERE id = $1 AND associacao_id = $2`, [id, req.usuario.associacao_id]);
+        const atual = await client.query(
+            `SELECT id, descricao, valor, vencimento, status FROM cobrancas WHERE id = $1 AND associacao_id = $2`,
+            [id, req.usuario.associacao_id]
+        );
         if (atual.rows.length === 0) {
             return res.status(404).json({ erro: 'Cobrança não encontrada' });
         }
@@ -249,6 +272,12 @@ router.put('/:id', autorizar('admin', 'diretoria'), async (req, res) => {
              RETURNING id, descricao, valor, vencimento, status`,
             [descricao || 'Mensalidade', valor, vencimento, id, req.usuario.associacao_id]
         );
+        await registrarLogAuditoria(client, {
+            associacaoId: req.usuario.associacao_id, usuarioId: req.usuario.id, usuarioNome: req.usuario.nome, usuarioEmail: req.usuario.email,
+            modulo: 'cobrancas', tipoAcao: 'edicao',
+            descricao: req.usuario.nome + ' editou a cobrança "' + resultado.rows[0].descricao + '"',
+            dadosAnteriores: atual.rows[0], dadosNovos: resultado.rows[0], req,
+        });
         res.json(resultado.rows[0]);
     } catch (err) {
         console.error(err);
@@ -263,10 +292,19 @@ router.delete('/:id', autorizar('admin'), async (req, res) => {
     const { id } = req.params;
     const client = await comConexaoTenant(req.usuario.associacao_id);
     try {
-        const resultado = await client.query(`DELETE FROM cobrancas WHERE id = $1 AND associacao_id = $2 RETURNING id`, [id, req.usuario.associacao_id]);
+        const resultado = await client.query(
+            `DELETE FROM cobrancas WHERE id = $1 AND associacao_id = $2 RETURNING id, descricao, valor, vencimento, status`,
+            [id, req.usuario.associacao_id]
+        );
         if (resultado.rows.length === 0) {
             return res.status(404).json({ erro: 'Cobrança não encontrada' });
         }
+        await registrarLogAuditoria(client, {
+            associacaoId: req.usuario.associacao_id, usuarioId: req.usuario.id, usuarioNome: req.usuario.nome, usuarioEmail: req.usuario.email,
+            modulo: 'cobrancas', tipoAcao: 'exclusao',
+            descricao: req.usuario.nome + ' excluiu a cobrança "' + resultado.rows[0].descricao + '"',
+            dadosAnteriores: resultado.rows[0], req,
+        });
         res.json({ ok: true });
     } catch (err) {
         console.error(err);

@@ -9,7 +9,9 @@ const { autenticarSuperAdmin, autorizarSuperAdmin, comConexaoSuperAdmin } = requ
 const { limiteLogin } = require('../middleware/rateLimiter');
 const { emailValido, gerarSenhaProvisoria, cpfValido, senhaForte } = require('../utils/validacao');
 const { registrarEventoAuth } = require('../utils/authLog');
+const { registrarLogAuditoria } = require('../utils/auditoria');
 const { calcularValorMensalidade, statusAssinatura } = require('../utils/precos');
+const { gerarExcelLogs, gerarPdfLogs } = require('../utils/exportarLogs');
 
 const FORMAS_COBRANCA_VALIDAS = ['pix', 'boleto', 'cartao', 'dinheiro', 'outro'];
 const PAPEIS_SUPERADMIN_VALIDOS = ['super_admin', 'administrador', 'suporte'];
@@ -82,11 +84,20 @@ router.post('/login', limiteLogin, async (req, res) => {
         );
         const admin = resultado.rows[0];
         if (!admin || !admin.ativo) {
+            await registrarLogAuditoria(pool, {
+                superAdminEmail: email, modulo: 'autenticacao', tipoAcao: 'login',
+                descricao: 'tentativa de login de super-admin falhou para ' + email, req,
+            });
             return res.status(401).json({ erro: 'Credenciais inválidas' });
         }
 
         const senhaCorreta = await bcrypt.compare(senha, admin.senha_hash);
         if (!senhaCorreta) {
+            await registrarLogAuditoria(pool, {
+                superAdminId: admin.id, superAdminNome: admin.nome, superAdminEmail: admin.email,
+                modulo: 'autenticacao', tipoAcao: 'login',
+                descricao: 'tentativa de login com senha incorreta para ' + admin.nome, req,
+            });
             return res.status(401).json({ erro: 'Credenciais inválidas' });
         }
 
@@ -95,6 +106,12 @@ router.post('/login', limiteLogin, async (req, res) => {
             JWT_SECRET,
             { expiresIn: '8h' }
         );
+
+        await registrarLogAuditoria(pool, {
+            superAdminId: admin.id, superAdminNome: admin.nome, superAdminEmail: admin.email,
+            modulo: 'autenticacao', tipoAcao: 'login',
+            descricao: admin.nome + ' (super-admin) realizou login', req,
+        });
 
         res.json({
             token,
@@ -154,6 +171,12 @@ router.post('/admins', autorizarSuperAdmin('super_admin'), async (req, res) => {
              VALUES ($1, $2, $3, $4, true) RETURNING id, nome, email, papel, ativo, criado_em`,
             [nome.trim(), email, senhaHash, papel || 'administrador']
         );
+        await registrarLogAuditoria(pool, {
+            superAdminId: req.superAdmin.id, superAdminNome: req.superAdmin.nome, superAdminEmail: req.superAdmin.email,
+            modulo: 'administradores', tipoAcao: 'criacao',
+            descricao: req.superAdmin.nome + ' criou o administrador ' + resultado.rows[0].nome + ' (' + resultado.rows[0].papel + ')',
+            dadosNovos: resultado.rows[0], req,
+        });
         res.status(201).json({ admin: resultado.rows[0], senha_provisoria: senhaProvisoria });
     } catch (err) {
         if (err.code === '23505') {
@@ -183,14 +206,25 @@ router.put('/admins/:id', autorizarSuperAdmin('super_admin'), async (req, res) =
     }
 
     try {
+        const anterior = await pool.query(`SELECT id, nome, email, papel FROM super_admins WHERE id = $1`, [id]);
+        if (anterior.rows.length === 0) {
+            return res.status(404).json({ erro: 'Administrador não encontrado' });
+        }
+
         const resultado = await pool.query(
             `UPDATE super_admins SET nome = $1, email = COALESCE($2, email), papel = COALESCE($3, papel)
              WHERE id = $4 RETURNING id, nome, email, papel, ativo, criado_em`,
             [nome.trim(), email || null, papel || null, id]
         );
-        if (resultado.rows.length === 0) {
-            return res.status(404).json({ erro: 'Administrador não encontrado' });
-        }
+
+        const mudouPapel = papel && papel !== anterior.rows[0].papel;
+        await registrarLogAuditoria(pool, {
+            superAdminId: req.superAdmin.id, superAdminNome: req.superAdmin.nome, superAdminEmail: req.superAdmin.email,
+            modulo: 'administradores', tipoAcao: mudouPapel ? 'alteracao_permissoes' : 'edicao',
+            descricao: req.superAdmin.nome + ' editou o administrador ' + resultado.rows[0].nome,
+            dadosAnteriores: anterior.rows[0], dadosNovos: resultado.rows[0], req,
+        });
+
         res.json(resultado.rows[0]);
     } catch (err) {
         if (err.code === '23505') {
@@ -236,6 +270,12 @@ router.patch('/admins/:id/status', autorizarSuperAdmin('super_admin'), async (re
             `UPDATE super_admins SET ativo = $1 WHERE id = $2 RETURNING id, nome, email, papel, ativo`,
             [ativo, id]
         );
+        await registrarLogAuditoria(pool, {
+            superAdminId: req.superAdmin.id, superAdminNome: req.superAdmin.nome, superAdminEmail: req.superAdmin.email,
+            modulo: 'administradores', tipoAcao: 'edicao',
+            descricao: req.superAdmin.nome + ' ' + (ativo ? 'ativou' : 'desativou') + ' o administrador ' + resultado.rows[0].nome,
+            dadosAnteriores: { ativo: !ativo }, dadosNovos: { ativo }, req,
+        });
         res.json(resultado.rows[0]);
     } catch (err) {
         console.error(err);
@@ -253,12 +293,18 @@ router.patch('/admins/:id/senha', autorizarSuperAdmin('super_admin'), async (req
 
     try {
         const resultado = await pool.query(
-            `UPDATE super_admins SET senha_hash = $1, deve_trocar_senha = true WHERE id = $2 RETURNING id, email`,
+            `UPDATE super_admins SET senha_hash = $1, deve_trocar_senha = true WHERE id = $2 RETURNING id, nome, email`,
             [senhaHash, id]
         );
         if (resultado.rows.length === 0) {
             return res.status(404).json({ erro: 'Administrador não encontrado' });
         }
+        await registrarLogAuditoria(pool, {
+            superAdminId: req.superAdmin.id, superAdminNome: req.superAdmin.nome, superAdminEmail: req.superAdmin.email,
+            modulo: 'administradores', tipoAcao: 'alteracao_senha',
+            descricao: req.superAdmin.nome + ' redefiniu a senha do administrador ' + resultado.rows[0].nome,
+            req,
+        });
         res.json({ ok: true, email: resultado.rows[0].email, senha_provisoria: senhaProvisoria });
     } catch (err) {
         console.error(err);
@@ -295,6 +341,11 @@ router.put('/perfil/senha', async (req, res) => {
             `UPDATE super_admins SET senha_hash = $1, deve_trocar_senha = false WHERE id = $2`,
             [novoHash, req.superAdmin.id]
         );
+        await registrarLogAuditoria(pool, {
+            superAdminId: req.superAdmin.id, superAdminNome: req.superAdmin.nome, superAdminEmail: req.superAdmin.email,
+            modulo: 'administradores', tipoAcao: 'alteracao_senha',
+            descricao: req.superAdmin.nome + ' alterou a própria senha', req,
+        });
 
         res.json({ ok: true });
     } catch (err) {
@@ -471,6 +522,12 @@ router.patch('/associacoes/:id/resetar-senha-admin', async (req, res) => {
             associacaoId: id,
             emailTentado: resultado.rows[0].email,
             evento: 'senha_provisoria_criada',
+            req,
+        });
+        await registrarLogAuditoria(client, {
+            associacaoId: id, superAdminId: req.superAdmin.id, superAdminNome: req.superAdmin.nome, superAdminEmail: req.superAdmin.email,
+            modulo: 'associacoes', tipoAcao: 'alteracao_senha',
+            descricao: req.superAdmin.nome + ' redefiniu a senha do admin da associação',
             req,
         });
 
@@ -651,6 +708,12 @@ router.post('/associacoes', async (req, res) => {
             evento: 'senha_provisoria_criada',
             req,
         });
+        await registrarLogAuditoria(client, {
+            associacaoId, superAdminId: req.superAdmin.id, superAdminNome: req.superAdmin.nome, superAdminEmail: req.superAdmin.email,
+            modulo: 'associacoes', tipoAcao: 'criacao',
+            descricao: req.superAdmin.nome + ' criou a associação "' + nome_associacao + '"',
+            dadosNovos: { id: associacaoId, nome: nome_associacao, plano: plano || 'trial' }, req,
+        });
 
         await client.query('COMMIT');
         res.status(201).json({
@@ -696,6 +759,17 @@ router.put('/associacoes/:id', async (req, res) => {
     try {
         await client.query('BEGIN');
 
+        const anterior = await client.query(
+            `SELECT nome, tipo, email, telefone, endereco, cidade, estado, cnpj, ativo,
+                    cep, site, plano, valor_mensalidade_manual, vencimento_assinatura, forma_cobranca
+             FROM associacoes WHERE id = $1`,
+            [id]
+        );
+        if (anterior.rows.length === 0) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ erro: 'Associação não encontrada' });
+        }
+
         const resultado = await client.query(
             `UPDATE associacoes
              SET nome = $1, tipo = COALESCE($2, tipo), email = $3, telefone = $4,
@@ -710,10 +784,6 @@ router.put('/associacoes/:id', async (req, res) => {
                 cep || null, site || null, logo_base64 || null,
                 plano || null, valor_mensalidade_manual || null, vencimento_assinatura || null, forma_cobranca || null, id]
         );
-        if (resultado.rows.length === 0) {
-            await client.query('ROLLBACK');
-            return res.status(404).json({ erro: 'Associação não encontrada' });
-        }
 
         if (cpf) {
             await client.query(
@@ -721,6 +791,13 @@ router.put('/associacoes/:id', async (req, res) => {
                 [cpf, id]
             );
         }
+
+        await registrarLogAuditoria(client, {
+            associacaoId: id, superAdminId: req.superAdmin.id, superAdminNome: req.superAdmin.nome, superAdminEmail: req.superAdmin.email,
+            modulo: 'associacoes', tipoAcao: 'edicao',
+            descricao: req.superAdmin.nome + ' editou a associação "' + resultado.rows[0].nome + '"',
+            dadosAnteriores: anterior.rows[0], dadosNovos: resultado.rows[0], req,
+        });
 
         await client.query('COMMIT');
         res.json(resultado.rows[0]);
@@ -743,14 +820,156 @@ router.delete('/associacoes/:id', async (req, res) => {
     const { id } = req.params;
     const client = await comConexaoSuperAdmin();
     try {
-        const resultado = await client.query(`DELETE FROM associacoes WHERE id = $1 RETURNING id`, [id]);
+        const resultado = await client.query(`DELETE FROM associacoes WHERE id = $1 RETURNING id, nome`, [id]);
         if (resultado.rows.length === 0) {
             return res.status(404).json({ erro: 'Associação não encontrada' });
         }
+        await registrarLogAuditoria(client, {
+            superAdminId: req.superAdmin.id, superAdminNome: req.superAdmin.nome, superAdminEmail: req.superAdmin.email,
+            modulo: 'associacoes', tipoAcao: 'exclusao',
+            descricao: req.superAdmin.nome + ' excluiu a associação "' + resultado.rows[0].nome + '"',
+            dadosAnteriores: resultado.rows[0], req,
+        });
         res.json({ ok: true });
     } catch (err) {
         console.error(err);
         res.status(500).json({ erro: 'Erro ao excluir associação' });
+    } finally {
+        client.release();
+    }
+});
+
+// ---------- Auditoria (tela central de logs, cross-tenant) ----------
+
+// Monta as condições de filtro compartilhadas por GET /logs e pelas duas
+// rotas de exportação -- evita repetir a mesma lógica três vezes.
+function construirFiltrosLogs(query) {
+    const { usuario, associacao, modulo, tipo_acao, data_inicio, data_fim } = query;
+    const condicoes = [];
+    const valores = [];
+
+    if (usuario) {
+        valores.push('%' + usuario + '%');
+        condicoes.push(`(l.usuario_nome ILIKE $${valores.length} OR l.usuario_email ILIKE $${valores.length}
+                         OR l.super_admin_nome ILIKE $${valores.length} OR l.super_admin_email ILIKE $${valores.length})`);
+    }
+    if (associacao) {
+        valores.push('%' + associacao + '%');
+        condicoes.push(`a.nome ILIKE $${valores.length}`);
+    }
+    if (modulo) {
+        valores.push(modulo);
+        condicoes.push(`l.modulo = $${valores.length}`);
+    }
+    if (tipo_acao) {
+        valores.push(tipo_acao);
+        condicoes.push(`l.tipo_acao = $${valores.length}::tipo_acao_auditoria`);
+    }
+    if (data_inicio) {
+        valores.push(data_inicio);
+        condicoes.push(`l.criado_em >= $${valores.length}::date`);
+    }
+    if (data_fim) {
+        valores.push(data_fim);
+        condicoes.push(`l.criado_em < $${valores.length}::date + interval '1 day'`);
+    }
+
+    return { where: condicoes.length ? 'WHERE ' + condicoes.join(' AND ') : '', valores };
+}
+
+// Limite de linhas por exportação -- evita que um filtro amplo demais gere um
+// arquivo gigante e derrube a instância por memória.
+const LIMITE_EXPORTACAO = 5000;
+
+// GET /superadmin/logs — lista paginada com filtros (qualquer nível de
+// permissão pode consultar; é só leitura)
+router.get('/logs', async (req, res) => {
+    const { pagina, por_pagina, ordenar } = req.query;
+    const client = await comConexaoSuperAdmin();
+    try {
+        const { where, valores } = construirFiltrosLogs(req.query);
+        const direcao = ordenar === 'asc' ? 'ASC' : 'DESC';
+        const limite = Math.min(parseInt(por_pagina, 10) || 50, 200);
+        const paginaAtual = Math.max(parseInt(pagina, 10) || 1, 1);
+        const offset = (paginaAtual - 1) * limite;
+
+        const total = await client.query(
+            `SELECT COUNT(*) AS total FROM logs_auditoria l LEFT JOIN associacoes a ON a.id = l.associacao_id ${where}`,
+            valores
+        );
+
+        const valoresPagina = [...valores, limite, offset];
+        const resultado = await client.query(
+            `SELECT l.id, l.criado_em, l.usuario_nome, l.usuario_email, l.super_admin_nome, l.super_admin_email,
+                    l.modulo, l.tipo_acao, l.descricao, l.dados_anteriores, l.dados_novos, l.ip, l.user_agent,
+                    a.nome AS associacao_nome
+             FROM logs_auditoria l
+             LEFT JOIN associacoes a ON a.id = l.associacao_id
+             ${where}
+             ORDER BY l.criado_em ${direcao}
+             LIMIT $${valoresPagina.length - 1} OFFSET $${valoresPagina.length}`,
+            valoresPagina
+        );
+
+        res.json({
+            registros: resultado.rows,
+            total: parseInt(total.rows[0].total, 10),
+            pagina: paginaAtual,
+            por_pagina: limite,
+        });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ erro: 'Erro ao listar logs de auditoria' });
+    } finally {
+        client.release();
+    }
+});
+
+// GET /superadmin/logs/exportar/:formato — respeita os mesmos filtros da
+// listagem, sem paginação (limitado a LIMITE_EXPORTACAO linhas), e registra a
+// própria exportação como uma linha de auditoria (tipo_acao 'exportacao').
+router.get('/logs/exportar/:formato', async (req, res) => {
+    const { formato } = req.params;
+    if (!['excel', 'pdf'].includes(formato)) {
+        return res.status(400).json({ erro: 'formato deve ser "excel" ou "pdf"' });
+    }
+
+    const client = await comConexaoSuperAdmin();
+    try {
+        const { where, valores } = construirFiltrosLogs(req.query);
+        const valoresLimitados = [...valores, LIMITE_EXPORTACAO];
+        const resultado = await client.query(
+            `SELECT l.criado_em, l.usuario_nome, l.usuario_email, l.super_admin_nome, l.super_admin_email,
+                    l.modulo, l.tipo_acao, l.descricao, l.ip
+             FROM logs_auditoria l
+             LEFT JOIN associacoes a ON a.id = l.associacao_id
+             ${where}
+             ORDER BY l.criado_em DESC
+             LIMIT $${valoresLimitados.length}`,
+            valoresLimitados
+        );
+
+        await registrarLogAuditoria(client, {
+            superAdminId: req.superAdmin.id, superAdminNome: req.superAdmin.nome, superAdminEmail: req.superAdmin.email,
+            modulo: 'auditoria', tipoAcao: 'exportacao',
+            descricao: req.superAdmin.nome + ' exportou os logs de auditoria em ' + formato.toUpperCase() + ' (' + resultado.rows.length + ' linhas)',
+            req,
+        });
+
+        if (formato === 'excel') {
+            const buffer = await gerarExcelLogs(resultado.rows);
+            res.set('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+            res.set('Content-Disposition', 'attachment; filename="logs-auditoria.xlsx"');
+            return res.send(Buffer.from(buffer));
+        }
+
+        const buffer = await gerarPdfLogs(resultado.rows);
+        res.set('Content-Type', 'application/pdf');
+        res.set('Content-Disposition', 'attachment; filename="logs-auditoria.pdf"');
+        res.send(buffer);
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ erro: 'Erro ao exportar logs de auditoria' });
     } finally {
         client.release();
     }

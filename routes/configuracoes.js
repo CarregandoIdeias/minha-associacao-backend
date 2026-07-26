@@ -1,6 +1,7 @@
 // routes/configuracoes.js
 const express = require('express');
 const { autenticar, bloquearSenhaProvisoria, autorizar, comConexaoTenant } = require('../middleware/auth');
+const { registrarLogAuditoria } = require('../utils/auditoria');
 
 const router = express.Router();
 router.use(autenticar);
@@ -39,10 +40,20 @@ router.put('/pix', autorizar('admin'), async (req, res) => {
 
     const client = await comConexaoTenant(req.usuario.associacao_id);
     try {
+        const anterior = await client.query(
+            `SELECT chave_pix, nome_recebedor_pix, cidade_pix FROM associacoes WHERE id = $1`,
+            [req.usuario.associacao_id]
+        );
         await client.query(
             `UPDATE associacoes SET chave_pix = $1, nome_recebedor_pix = $2, cidade_pix = $3 WHERE id = $4`,
             [chave_pix, nome_recebedor_pix, cidade_pix, req.usuario.associacao_id]
         );
+        await registrarLogAuditoria(client, {
+            associacaoId: req.usuario.associacao_id, usuarioId: req.usuario.id, usuarioNome: req.usuario.nome, usuarioEmail: req.usuario.email,
+            modulo: 'configuracoes', tipoAcao: 'edicao',
+            descricao: req.usuario.nome + ' atualizou a configuração de Pix',
+            dadosAnteriores: anterior.rows[0] || null, dadosNovos: { chave_pix, nome_recebedor_pix, cidade_pix }, req,
+        });
         res.json({ ok: true });
     } catch (err) {
         console.error(err);
@@ -80,10 +91,20 @@ router.put('/alertas', autorizar('admin'), async (req, res) => {
 
     const client = await comConexaoTenant(req.usuario.associacao_id);
     try {
+        const anterior = await client.query(
+            `SELECT dias_alerta_vencimento FROM associacoes WHERE id = $1`,
+            [req.usuario.associacao_id]
+        );
         await client.query(
             `UPDATE associacoes SET dias_alerta_vencimento = $1 WHERE id = $2`,
             [dias, req.usuario.associacao_id]
         );
+        await registrarLogAuditoria(client, {
+            associacaoId: req.usuario.associacao_id, usuarioId: req.usuario.id, usuarioNome: req.usuario.nome, usuarioEmail: req.usuario.email,
+            modulo: 'configuracoes', tipoAcao: 'edicao',
+            descricao: req.usuario.nome + ' atualizou a configuração de alertas de vencimento',
+            dadosAnteriores: anterior.rows[0] || null, dadosNovos: { dias_alerta_vencimento: dias }, req,
+        });
         res.json({ ok: true });
     } catch (err) {
         console.error(err);

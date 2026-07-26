@@ -8,6 +8,7 @@ const config = require('../config/env');
 const { autenticar, comConexaoTenant, comConexaoAuth } = require('../middleware/auth');
 const { senhaForte } = require('../utils/validacao');
 const { registrarEventoAuth } = require('../utils/authLog');
+const { registrarLogAuditoria } = require('../utils/auditoria');
 const { limiteLogin, limiteRedefinicao } = require('../middleware/rateLimiter');
 
 const router = express.Router();
@@ -52,6 +53,10 @@ router.post('/login', limiteLogin, async (req, res) => {
     try {
         if (!usuario || !usuario.ativo) {
             await registrarEventoAuth(pool, { emailTentado: email, evento: 'login_falha', req });
+            await registrarLogAuditoria(pool, {
+                usuarioEmail: email, modulo: 'autenticacao', tipoAcao: 'login',
+                descricao: 'tentativa de login falhou para ' + email, req,
+            });
             return res.status(401).json({ erro: 'Credenciais inválidas' });
         }
 
@@ -62,6 +67,11 @@ router.post('/login', limiteLogin, async (req, res) => {
                 emailTentado: email,
                 evento: 'login_falha',
                 req,
+            });
+            await registrarLogAuditoria(pool, {
+                associacaoId: usuario.associacao_id, usuarioId: usuario.id, usuarioNome: usuario.nome, usuarioEmail: email,
+                modulo: 'autenticacao', tipoAcao: 'login',
+                descricao: usuario.nome + ' tentou logar com a associação bloqueada', req,
             });
             return res.status(403).json({ erro: 'O acesso da sua associação está temporariamente bloqueado. Fale com o suporte.' });
         }
@@ -75,6 +85,11 @@ router.post('/login', limiteLogin, async (req, res) => {
                 evento: 'login_falha',
                 req,
             });
+            await registrarLogAuditoria(pool, {
+                associacaoId: usuario.associacao_id, usuarioId: usuario.id, usuarioNome: usuario.nome, usuarioEmail: email,
+                modulo: 'autenticacao', tipoAcao: 'login',
+                descricao: 'tentativa de login com senha incorreta para ' + usuario.nome, req,
+            });
             return res.status(401).json({ erro: 'Credenciais inválidas' });
         }
 
@@ -86,6 +101,11 @@ router.post('/login', limiteLogin, async (req, res) => {
             emailTentado: email,
             evento: 'login_sucesso',
             req,
+        });
+        await registrarLogAuditoria(pool, {
+            associacaoId: usuario.associacao_id, usuarioId: usuario.id, usuarioNome: usuario.nome, usuarioEmail: email,
+            modulo: 'autenticacao', tipoAcao: 'login',
+            descricao: usuario.nome + ' realizou login', req,
         });
 
         res.json({
@@ -188,6 +208,11 @@ router.post('/redefinir-senha', limiteRedefinicao, async (req, res) => {
             evento: 'senha_redefinida',
             req,
         });
+        await registrarLogAuditoria(client, {
+            associacaoId: registro.associacao_id, usuarioId: registro.usuario_id, usuarioEmail: registro.email,
+            modulo: 'autenticacao', tipoAcao: 'alteracao_senha',
+            descricao: registro.email + ' redefiniu a própria senha via link', req,
+        });
 
         await client.query('COMMIT');
         res.json({ ok: true });
@@ -255,6 +280,11 @@ router.put('/senha', autenticar, async (req, res) => {
                 evento: 'senha_alterada',
                 req,
             });
+            await registrarLogAuditoria(clienteEscrita, {
+                associacaoId: req.usuario.associacao_id, usuarioId: req.usuario.id, usuarioNome: req.usuario.nome, usuarioEmail: req.usuario.email,
+                modulo: 'autenticacao', tipoAcao: 'alteracao_senha',
+                descricao: req.usuario.nome + ' alterou a própria senha', req,
+            });
         } finally {
             clienteEscrita.release();
         }
@@ -278,6 +308,11 @@ router.post('/logout', autenticar, async (req, res) => {
         emailTentado: req.usuario.email,
         evento: 'logout',
         req,
+    });
+    await registrarLogAuditoria(pool, {
+        associacaoId: req.usuario.associacao_id, usuarioId: req.usuario.id, usuarioNome: req.usuario.nome, usuarioEmail: req.usuario.email,
+        modulo: 'autenticacao', tipoAcao: 'logout',
+        descricao: req.usuario.nome + ' realizou logout', req,
     });
     res.json({ ok: true });
 });

@@ -220,6 +220,20 @@ Guardas de segurança em `/admins/:id/status`: bloqueia desativar a própria con
 
 Testado localmente contra produção (3 super-admins de teste criados via `pool.query` direto — `super_admins` não tem RLS —, todos os fluxos exercitados via curl e visualmente no `superadmin.html`, depois removidos com `DELETE FROM super_admins WHERE email IN (...)`).
 
+## Auditoria central (Fase 2 da melhoria do Super Admin, 26/07/2026)
+
+Nova tabela `logs_auditoria` (migration `20260726110000_logs_auditoria.sql`) — log cross-tenant pra tela "Auditoria" do Super Admin, diferente de `atividades` (feed leve do Dashboard de uma associação) e `auth_logs` (só login/logout/senha). `utils/auditoria.js` (`registrarLogAuditoria`) é chamado logo depois de `registrarAtividade`/`registrarEventoAuth` em praticamente toda rota que muda dado: `associados.js`, `usuarios.js`, `cobrancas.js`, `comunicados.js`, `configuracoes.js` (tenant, via `comConexaoTenant`), `auth.js` (login/logout/troca de senha) e `superadmin.js` (login do super-admin — não era logado em lugar nenhum antes —, CRUD de associações e de administradores).
+
+Segue o mesmo padrão de RLS de `auth_logs`: `FOR INSERT WITH CHECK (true)` (sempre permitido, controlado só pelo código) + `SELECT` restrito por tenant ou bypass do super-admin. `associacao_id` usa `ON DELETE SET NULL` (não `CASCADE`) de propósito — excluir uma associação não pode apagar o próprio histórico de auditoria dela, inclusive o registro da exclusão em si.
+
+**Descoberta não-óbvia, achada limpando dados de teste**: como só existem policies de `INSERT`/`SELECT` (nenhuma de `UPDATE`/`DELETE`), o Postgres nega silenciosamente qualquer tentativa de apagar ou editar uma linha via `app_runtime` — nem o próprio super-admin consegue apagar um log pela API. Isso é uma proteção real (ninguém encobre rastro apagando registro), mantida de propósito, mas também significa que **limpar dado de teste dessa tabela específica exige rodar o `DELETE` direto no SQL Editor do Supabase** (só o dono `postgres` bypassa RLS por completo), o mesmo tipo de limitação que já existia pra DDL — só que aqui é a própria política de RLS, não falta de privilégio da role.
+
+Para diffs de edição (`dados_anteriores`/`dados_novos`, jsonb), o padrão é: um `SELECT` do estado atual antes do `UPDATE`/`DELETE` (uma query a mais por rota de edição, aceitável) e o `RETURNING` do próprio comando como "depois". `tipo_acao` distingue `edicao` de `alteracao_permissoes` comparando o campo `papel` antes/depois (usado em `usuarios.js` PUT e `superadmin.js` PUT /admins/:id).
+
+Novas rotas em `routes/superadmin.js`: `GET /superadmin/logs` (filtros: `usuario`, `associacao`, `modulo`, `tipo_acao`, `data_inicio`, `data_fim`; paginação `pagina`/`por_pagina`; ordenação `ordenar=asc|desc`) e `GET /superadmin/logs/exportar/:formato` (`excel`|`pdf`, mesmos filtros, sem paginação, limitado a `LIMITE_EXPORTACAO` = 5000 linhas pra não estourar memória, e a própria exportação vira uma linha de auditoria com `tipo_acao: 'exportacao'`). Geração dos arquivos em `utils/exportarLogs.js`, usando `exceljs` (novo em `package.json`) e `pdfkit` (novo, sem suporte nativo a tabela — desenhado manualmente com colunas de largura fixa e quebra de página).
+
+`npm install` de `exceljs`/`pdfkit` trouxe ~10 vulnerabilidades transitivas (`brace-expansion`/`glob` dentro da cadeia do `archiver` que o `exceljs` usa pra montar o `.xlsx`) — mesma categoria já aceita como pendência de baixo risco no projeto (ver "Auditoria de escala" abaixo); não achei justificativa pra forçar downgrade do `exceljs` por causa disso.
+
 ## Isolamento entre tenants (RLS) — já está ativo
 
 Não é só disciplina de código (`WHERE associacao_id = $1` em toda query,

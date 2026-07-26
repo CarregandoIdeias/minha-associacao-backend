@@ -2,6 +2,7 @@
 const express = require('express');
 const { autenticar, bloquearSenhaProvisoria, autorizar, comConexaoTenant } = require('../middleware/auth');
 const { registrarAtividade } = require('../utils/atividadeLog');
+const { registrarLogAuditoria } = require('../utils/auditoria');
 
 const router = express.Router();
 router.use(autenticar);
@@ -89,6 +90,12 @@ router.post('/', autorizar('admin', 'diretoria'), async (req, res) => {
             tipo: 'comunicado_publicado',
             descricao: 'publicou o comunicado "' + resultado.rows[0].titulo + '"',
         });
+        await registrarLogAuditoria(client, {
+            associacaoId: req.usuario.associacao_id, usuarioId: req.usuario.id, usuarioNome: req.usuario.nome, usuarioEmail: req.usuario.email,
+            modulo: 'comunicados', tipoAcao: 'criacao',
+            descricao: req.usuario.nome + ' publicou o comunicado "' + resultado.rows[0].titulo + '"',
+            dadosNovos: resultado.rows[0], req,
+        });
 
         res.status(201).json(resultado.rows[0]);
     } catch (err) {
@@ -110,6 +117,14 @@ router.put('/:id', autorizar('admin', 'diretoria'), async (req, res) => {
 
     const client = await comConexaoTenant(req.usuario.associacao_id);
     try {
+        const anterior = await client.query(
+            `SELECT id, titulo, conteudo, categoria_alvo, publicado_em, status, destaque FROM comunicados WHERE id = $1 AND associacao_id = $2`,
+            [id, req.usuario.associacao_id]
+        );
+        if (anterior.rows.length === 0) {
+            return res.status(404).json({ erro: 'Comunicado não encontrado' });
+        }
+
         const resultado = await client.query(
             `UPDATE comunicados
              SET titulo = $1, conteudo = $2, categoria_alvo = $3, destaque = $4,
@@ -118,9 +133,12 @@ router.put('/:id', autorizar('admin', 'diretoria'), async (req, res) => {
              RETURNING id, titulo, conteudo, categoria_alvo, publicado_em, status, destaque`,
             [titulo, conteudo, categoria_alvo || null, !!destaque, publicado_em || null, status || null, id, req.usuario.associacao_id]
         );
-        if (resultado.rows.length === 0) {
-            return res.status(404).json({ erro: 'Comunicado não encontrado' });
-        }
+        await registrarLogAuditoria(client, {
+            associacaoId: req.usuario.associacao_id, usuarioId: req.usuario.id, usuarioNome: req.usuario.nome, usuarioEmail: req.usuario.email,
+            modulo: 'comunicados', tipoAcao: 'edicao',
+            descricao: req.usuario.nome + ' editou o comunicado "' + resultado.rows[0].titulo + '"',
+            dadosAnteriores: anterior.rows[0], dadosNovos: resultado.rows[0], req,
+        });
         res.json(resultado.rows[0]);
     } catch (err) {
         console.error(err);
@@ -135,7 +153,19 @@ router.delete('/:id', autorizar('admin', 'diretoria'), async (req, res) => {
     const { id } = req.params;
     const client = await comConexaoTenant(req.usuario.associacao_id);
     try {
-        await client.query(`DELETE FROM comunicados WHERE id = $1 AND associacao_id = $2`, [id, req.usuario.associacao_id]);
+        const resultado = await client.query(
+            `DELETE FROM comunicados WHERE id = $1 AND associacao_id = $2 RETURNING id, titulo`,
+            [id, req.usuario.associacao_id]
+        );
+        if (resultado.rows.length === 0) {
+            return res.status(404).json({ erro: 'Comunicado não encontrado' });
+        }
+        await registrarLogAuditoria(client, {
+            associacaoId: req.usuario.associacao_id, usuarioId: req.usuario.id, usuarioNome: req.usuario.nome, usuarioEmail: req.usuario.email,
+            modulo: 'comunicados', tipoAcao: 'exclusao',
+            descricao: req.usuario.nome + ' excluiu o comunicado "' + resultado.rows[0].titulo + '"',
+            dadosAnteriores: resultado.rows[0], req,
+        });
         res.json({ ok: true });
     } catch (err) {
         console.error(err);

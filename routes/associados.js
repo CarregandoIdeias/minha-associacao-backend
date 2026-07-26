@@ -6,6 +6,7 @@ const { autenticar, bloquearSenhaProvisoria, autorizar, comConexaoTenant } = req
 const { cpfValido, emailValido, gerarSenhaProvisoria } = require('../utils/validacao');
 const { registrarEventoAuth } = require('../utils/authLog');
 const { registrarAtividade } = require('../utils/atividadeLog');
+const { registrarLogAuditoria } = require('../utils/auditoria');
 
 const router = express.Router();
 
@@ -88,6 +89,12 @@ router.post('/', autorizar('admin', 'diretoria'), async (req, res) => {
             tipo: 'associado_criado',
             descricao: 'cadastrou o associado ' + resultado.rows[0].nome_completo,
         });
+        await registrarLogAuditoria(client, {
+            associacaoId: req.usuario.associacao_id, usuarioId: req.usuario.id, usuarioNome: req.usuario.nome, usuarioEmail: req.usuario.email,
+            modulo: 'associados', tipoAcao: 'criacao',
+            descricao: req.usuario.nome + ' cadastrou o associado ' + resultado.rows[0].nome_completo,
+            dadosNovos: resultado.rows[0], req,
+        });
 
         await client.query('COMMIT');
         res.status(201).json({ ...resultado.rows[0], email: email.trim(), senha_provisoria: senhaProvisoria });
@@ -127,6 +134,14 @@ router.put('/:id', autorizar('admin', 'diretoria'), async (req, res) => {
 
     const client = await comConexaoTenant(req.usuario.associacao_id);
     try {
+        const anterior = await client.query(
+            `SELECT id, nome_completo, cpf, telefone, categoria, status, observacao FROM associados WHERE id = $1 AND associacao_id = $2`,
+            [id, req.usuario.associacao_id]
+        );
+        if (anterior.rows.length === 0) {
+            return res.status(404).json({ erro: 'Associado não encontrado' });
+        }
+
         const resultado = await client.query(
             `UPDATE associados
              SET nome_completo = $1, cpf = $2, telefone = $3, categoria = $4,
@@ -136,16 +151,18 @@ router.put('/:id', autorizar('admin', 'diretoria'), async (req, res) => {
             [nome_completo.trim(), cpf || null, telefone || null, categoria || null, status || null, observacao || null, id, req.usuario.associacao_id]
         );
 
-        if (resultado.rows.length === 0) {
-            return res.status(404).json({ erro: 'Associado não encontrado' });
-        }
-
         await registrarAtividade(client, {
             associacaoId: req.usuario.associacao_id,
             usuarioId: req.usuario.id,
             usuarioNome: req.usuario.nome,
             tipo: 'associado_editado',
             descricao: 'atualizou o cadastro de ' + resultado.rows[0].nome_completo,
+        });
+        await registrarLogAuditoria(client, {
+            associacaoId: req.usuario.associacao_id, usuarioId: req.usuario.id, usuarioNome: req.usuario.nome, usuarioEmail: req.usuario.email,
+            modulo: 'associados', tipoAcao: 'edicao',
+            descricao: req.usuario.nome + ' atualizou o cadastro de ' + resultado.rows[0].nome_completo,
+            dadosAnteriores: anterior.rows[0], dadosNovos: resultado.rows[0], req,
         });
 
         res.json(resultado.rows[0]);
@@ -165,10 +182,19 @@ router.delete('/:id', autorizar('admin'), async (req, res) => {
     const { id } = req.params;
     const client = await comConexaoTenant(req.usuario.associacao_id);
     try {
-        const resultado = await client.query(`DELETE FROM associados WHERE id = $1 AND associacao_id = $2 RETURNING id`, [id, req.usuario.associacao_id]);
+        const resultado = await client.query(
+            `DELETE FROM associados WHERE id = $1 AND associacao_id = $2 RETURNING id, nome_completo, cpf`,
+            [id, req.usuario.associacao_id]
+        );
         if (resultado.rows.length === 0) {
             return res.status(404).json({ erro: 'Associado não encontrado' });
         }
+        await registrarLogAuditoria(client, {
+            associacaoId: req.usuario.associacao_id, usuarioId: req.usuario.id, usuarioNome: req.usuario.nome, usuarioEmail: req.usuario.email,
+            modulo: 'associados', tipoAcao: 'exclusao',
+            descricao: req.usuario.nome + ' excluiu o associado ' + resultado.rows[0].nome_completo,
+            dadosAnteriores: resultado.rows[0], req,
+        });
         res.json({ ok: true });
     } catch (err) {
         console.error(err);
