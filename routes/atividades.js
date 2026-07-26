@@ -1,10 +1,11 @@
 // routes/atividades.js
 const express = require('express');
-const { autenticar, bloquearSenhaProvisoria, autorizar, comConexaoTenant } = require('../middleware/auth');
+const { autenticar, bloquearSenhaProvisoria, bloquearTrialExpirado, autorizar, comConexaoTenant } = require('../middleware/auth');
 
 const router = express.Router();
 router.use(autenticar);
 router.use(bloquearSenhaProvisoria);
+router.use(bloquearTrialExpirado);
 
 // GET /atividades — últimas atividades da associação (cadastro/edição de
 // associado, pagamento registrado, comunicado publicado, usuário convidado),

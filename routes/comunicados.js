@@ -1,12 +1,13 @@
 // routes/comunicados.js
 const express = require('express');
-const { autenticar, bloquearSenhaProvisoria, autorizar, comConexaoTenant } = require('../middleware/auth');
+const { autenticar, bloquearSenhaProvisoria, bloquearTrialExpirado, autorizar, comConexaoTenant } = require('../middleware/auth');
 const { registrarAtividade } = require('../utils/atividadeLog');
 const { registrarLogAuditoria } = require('../utils/auditoria');
 
 const router = express.Router();
 router.use(autenticar);
 router.use(bloquearSenhaProvisoria);
+router.use(bloquearTrialExpirado);
 
 // GET /comunicados — lista comunicados (comportamento varia por papel)
 // Admin/diretoria: veem tudo (inclusive inativos/agendados), com busca e filtro de status,

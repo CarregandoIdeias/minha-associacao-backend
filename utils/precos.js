@@ -22,7 +22,13 @@ function calcularValorMensalidade(plano, totalAssociados, valorManual) {
 // uma coluna própria pra não dessincronizar do que está de fato gravado.
 function statusAssinatura(associacao, hoje) {
     if (!associacao.ativo) return 'bloqueada';
-    if (associacao.plano === 'trial') return 'trial';
+    if (associacao.plano === 'trial') {
+        const dataAgora = hoje || new Date();
+        if (associacao.trial_expira_em && new Date(associacao.trial_expira_em) < dataAgora) {
+            return 'trial_expirado';
+        }
+        return 'trial';
+    }
     if (!associacao.vencimento_assinatura) return 'ativa';
 
     const dataHoje = hoje || new Date();

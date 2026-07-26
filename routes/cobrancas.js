@@ -1,12 +1,13 @@
 // routes/cobrancas.js
 const express = require('express');
-const { autenticar, bloquearSenhaProvisoria, autorizar, comConexaoTenant } = require('../middleware/auth');
+const { autenticar, bloquearSenhaProvisoria, bloquearTrialExpirado, autorizar, comConexaoTenant } = require('../middleware/auth');
 const { registrarAtividade } = require('../utils/atividadeLog');
 const { registrarLogAuditoria } = require('../utils/auditoria');
 
 const router = express.Router();
 router.use(autenticar);
 router.use(bloquearSenhaProvisoria);
+router.use(bloquearTrialExpirado);
 
 // GET /cobrancas — lista cobranças da associação, com filtro opcional por status ou associado (só admin/diretoria)
 router.get('/', autorizar('admin', 'diretoria'), async (req, res) => {

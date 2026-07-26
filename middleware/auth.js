@@ -43,7 +43,8 @@ async function autenticar(req, res, next) {
         const client = await comConexaoAuth();
         try {
             const resultado = await client.query(
-                `SELECT u.ativo, u.papel, u.nome, a.ativo AS associacao_ativa
+                `SELECT u.ativo, u.papel, u.nome, a.ativo AS associacao_ativa,
+                        a.plano, a.trial_expira_em
                  FROM usuarios u
                  JOIN associacoes a ON a.id = u.associacao_id
                  WHERE u.id = $1`,
@@ -54,11 +55,13 @@ async function autenticar(req, res, next) {
                 return res.status(401).json({ erro: 'Token inválido ou expirado' });
             }
 
-            // { id, associacao_id, papel, email, deve_trocar_senha, nome } —
-            // papel e nome vêm frescos do banco, não do token, para uma troca de
-            // papel ou de nome valer na hora (nome também usado para o snapshot
-            // em atividades, ver utils/atividadeLog.js).
-            req.usuario = { ...payload, papel: usuario.papel, nome: usuario.nome };
+            // { id, associacao_id, papel, email, deve_trocar_senha, nome, plano,
+            // trial_expira_em } — papel/nome/plano/trial_expira_em vêm frescos do
+            // banco, não do token, para uma troca de papel, nome ou a expiração do
+            // trial valerem na hora (nome também usado pro snapshot em
+            // atividades, ver utils/atividadeLog.js; plano/trial_expira_em usados
+            // por bloquearTrialExpirado abaixo).
+            req.usuario = { ...payload, papel: usuario.papel, nome: usuario.nome, plano: usuario.plano, trial_expira_em: usuario.trial_expira_em };
             return next();
         } catch (err) {
             if (tentativa === 2) {
@@ -80,6 +83,20 @@ function bloquearSenhaProvisoria(req, res, next) {
         return res.status(403).json({
             erro: 'Você precisa definir uma nova senha antes de continuar',
             codigo: 'SENHA_PROVISORIA_PENDENTE',
+        });
+    }
+    next();
+}
+
+// Bloqueia rotas normais quando o trial da associação já expirou (mantém
+// dados preservados, só nega acesso). Usar logo depois de autenticar() em
+// cada router, exceto em routes/plano.js (que precisa continuar funcionando
+// pra associação conseguir contratar um plano e sair do bloqueio).
+function bloquearTrialExpirado(req, res, next) {
+    if (req.usuario && req.usuario.plano === 'trial' && req.usuario.trial_expira_em && new Date(req.usuario.trial_expira_em) < new Date()) {
+        return res.status(403).json({
+            erro: 'Seu período de avaliação terminou. Contrate um plano para continuar usando a plataforma.',
+            codigo: 'TRIAL_EXPIRADO',
         });
     }
     next();
@@ -190,6 +207,7 @@ async function comConexaoAuth() {
 module.exports = {
     autenticar,
     bloquearSenhaProvisoria,
+    bloquearTrialExpirado,
     autorizar,
     comConexaoTenant,
     autenticarSuperAdmin,

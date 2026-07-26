@@ -2,7 +2,7 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
-const { autenticar, bloquearSenhaProvisoria, autorizar, comConexaoTenant } = require('../middleware/auth');
+const { autenticar, bloquearSenhaProvisoria, bloquearTrialExpirado, autorizar, comConexaoTenant } = require('../middleware/auth');
 const { emailValido, gerarSenhaProvisoria } = require('../utils/validacao');
 const { registrarEventoAuth } = require('../utils/authLog');
 const { registrarAtividade } = require('../utils/atividadeLog');
@@ -11,6 +11,7 @@ const { registrarLogAuditoria } = require('../utils/auditoria');
 const router = express.Router();
 router.use(autenticar);
 router.use(bloquearSenhaProvisoria);
+router.use(bloquearTrialExpirado);
 
 // GET /usuarios — lista os usuários da associação (só admin)
 router.get('/', autorizar('admin'), async (req, res) => {

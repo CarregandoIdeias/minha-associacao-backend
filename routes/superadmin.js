@@ -619,8 +619,15 @@ router.get('/dashboard', async (req, res) => {
             WHERE criado_em >= now() - interval '7 days'
             ORDER BY criado_em DESC LIMIT 10
         `);
+        const solicitacoesPendentes = await client.query(`
+            SELECT COUNT(*) AS total FROM solicitacoes_plano WHERE status = 'pendente'
+        `);
 
         const alertas = [];
+        const totalSolicitacoesPendentes = parseInt(solicitacoesPendentes.rows[0].total, 10);
+        if (totalSolicitacoesPendentes > 0) {
+            alertas.push({ nivel: 'alerta', texto: `${totalSolicitacoesPendentes} solicitação(ões) de contratação de plano aguardando aprovação` });
+        }
         const totalAtrasadas = parseInt(kpis.rows[0].total_atrasadas, 10);
         if (totalAtrasadas > 0) {
             alertas.push({ nivel: 'alerta', texto: `${totalAtrasadas} mensalidade(s) atrasada(s) na plataforma` });
@@ -646,6 +653,7 @@ router.get('/dashboard', async (req, res) => {
             receita_historico: receitaHistorico.rows,
             distribuicao_planos: distribuicaoPlanos.rows,
             ultimas_associacoes: ultimasAssociacoes.rows,
+            solicitacoes_pendentes_plano: totalSolicitacoesPendentes,
             alertas: alertas.slice(0, 10),
         });
     } catch (err) {
@@ -664,7 +672,7 @@ router.post('/associacoes', async (req, res) => {
     const {
         nome_associacao, tipo, email, telefone, endereco, cidade, estado, cep, site, cnpj, logo_base64,
         nome_admin, cpf,
-        plano, valor_mensalidade_manual, vencimento_assinatura, forma_cobranca
+        plano, valor_mensalidade_manual, vencimento_assinatura, forma_cobranca, trial_dias
     } = req.body;
 
     if (!nome_associacao || !nome_admin || !email) {
@@ -679,6 +687,10 @@ router.post('/associacoes', async (req, res) => {
     if (forma_cobranca && !FORMAS_COBRANCA_VALIDAS.includes(forma_cobranca)) {
         return res.status(400).json({ erro: 'forma_cobranca inválida' });
     }
+    const diasTrial = trial_dias ? parseInt(trial_dias, 10) : 15;
+    if (isNaN(diasTrial) || diasTrial < 1 || diasTrial > 365) {
+        return res.status(400).json({ erro: 'trial_dias deve ser um número entre 1 e 365' });
+    }
 
     // Gerado/hasheado antes de pegar a conexão -- ver comentário equivalente
     // em routes/associados.js (POST /).
@@ -689,13 +701,20 @@ router.post('/associacoes', async (req, res) => {
     try {
         await client.query('BEGIN');
 
+        // trial_expira_em só faz sentido pra quem nasce em trial -- planos
+        // pagos criados direto (raro, mas possível) não têm expiração de trial.
+        const planoFinal = plano || 'trial';
         const associacao = await client.query(
             `INSERT INTO associacoes (nome, tipo, email, telefone, endereco, cidade, estado, cep, site, cnpj, logo_url,
-                                       plano, valor_mensalidade_manual, vencimento_assinatura, forma_cobranca)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) RETURNING id`,
+                                       plano, valor_mensalidade_manual, vencimento_assinatura, forma_cobranca,
+                                       trial_dias, trial_expira_em)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
+                     CASE WHEN $12 = 'trial' THEN now() + ($16 || ' days')::interval ELSE NULL END)
+             RETURNING id`,
             [nome_associacao, tipo || 'outra', email, telefone || null, endereco || null, cidade || null, estado || null,
                 cep || null, site || null, cnpj || null, logo_base64 || null,
-                plano || 'trial', valor_mensalidade_manual || null, vencimento_assinatura || null, forma_cobranca || null]
+                planoFinal, valor_mensalidade_manual || null, vencimento_assinatura || null, forma_cobranca || null,
+                diasTrial]
         );
         const associacaoId = associacao.rows[0].id;
 
@@ -746,7 +765,7 @@ router.put('/associacoes/:id', async (req, res) => {
     const { id } = req.params;
     const {
         nome, tipo, email, telefone, endereco, cidade, estado, cep, site, cnpj, logo_base64, ativo,
-        plano, valor_mensalidade_manual, vencimento_assinatura, forma_cobranca, cpf
+        plano, valor_mensalidade_manual, vencimento_assinatura, forma_cobranca, cpf, trial_dias, trial_expira_em
     } = req.body;
 
     if (!nome || !nome.trim()) {
@@ -758,6 +777,9 @@ router.put('/associacoes/:id', async (req, res) => {
     if (forma_cobranca && !FORMAS_COBRANCA_VALIDAS.includes(forma_cobranca)) {
         return res.status(400).json({ erro: 'forma_cobranca inválida' });
     }
+    if (trial_dias !== undefined && trial_dias !== null && (isNaN(parseInt(trial_dias, 10)) || trial_dias < 1 || trial_dias > 365)) {
+        return res.status(400).json({ erro: 'trial_dias deve ser um número entre 1 e 365' });
+    }
 
     const client = await comConexaoSuperAdmin();
     try {
@@ -765,7 +787,8 @@ router.put('/associacoes/:id', async (req, res) => {
 
         const anterior = await client.query(
             `SELECT nome, tipo, email, telefone, endereco, cidade, estado, cnpj, ativo,
-                    cep, site, plano, valor_mensalidade_manual, vencimento_assinatura, forma_cobranca
+                    cep, site, plano, valor_mensalidade_manual, vencimento_assinatura, forma_cobranca,
+                    trial_dias, trial_expira_em
              FROM associacoes WHERE id = $1`,
             [id]
         );
@@ -780,13 +803,16 @@ router.put('/associacoes/:id', async (req, res) => {
                  endereco = $5, cidade = $6, estado = $7, cnpj = $8, ativo = COALESCE($9, ativo),
                  cep = $10, site = $11, logo_url = COALESCE($12, logo_url),
                  plano = COALESCE($13, plano), valor_mensalidade_manual = $14,
-                 vencimento_assinatura = $15, forma_cobranca = $16
+                 vencimento_assinatura = $15, forma_cobranca = $16,
+                 trial_dias = COALESCE($18, trial_dias), trial_expira_em = COALESCE($19, trial_expira_em)
              WHERE id = $17
              RETURNING id, nome, tipo, email, telefone, endereco, cidade, estado, cnpj, ativo,
-                       cep, site, logo_url, plano, valor_mensalidade_manual, vencimento_assinatura, forma_cobranca`,
+                       cep, site, logo_url, plano, valor_mensalidade_manual, vencimento_assinatura, forma_cobranca,
+                       trial_dias, trial_expira_em`,
             [nome.trim(), tipo || null, email || null, telefone || null, endereco || null, cidade || null, estado || null, cnpj || null, ativo,
                 cep || null, site || null, logo_base64 || null,
-                plano || null, valor_mensalidade_manual || null, vencimento_assinatura || null, forma_cobranca || null, id]
+                plano || null, valor_mensalidade_manual || null, vencimento_assinatura || null, forma_cobranca || null, id,
+                trial_dias || null, trial_expira_em || null]
         );
 
         if (cpf) {
@@ -979,6 +1005,214 @@ router.get('/logs/exportar/:formato', async (req, res) => {
     } catch (err) {
         console.error(err);
         res.status(500).json({ erro: 'Erro ao exportar logs de auditoria' });
+    } finally {
+        client.release();
+    }
+});
+
+// ---------- Solicitações de contratação/upgrade de plano ----------
+
+// GET /superadmin/solicitacoes-plano — lista solicitações (padrão: só as
+// pendentes, ?status=todas pra ver aprovadas/rejeitadas também). Qualquer
+// nível de permissão pode ver/aprovar -- é operacional, não gestão de acesso.
+router.get('/solicitacoes-plano', async (req, res) => {
+    const { status } = req.query;
+    const client = await comConexaoSuperAdmin();
+    try {
+        const where = status === 'todas' ? '' : `WHERE sp.status = 'pendente'`;
+        const resultado = await client.query(`
+            SELECT sp.id, sp.plano_solicitado, sp.valor_referencia, sp.status, sp.solicitado_em,
+                   sp.respondido_em, sp.observacao_resposta,
+                   a.id AS associacao_id, a.nome AS associacao_nome,
+                   u.nome AS solicitado_por_nome
+            FROM solicitacoes_plano sp
+            JOIN associacoes a ON a.id = sp.associacao_id
+            LEFT JOIN usuarios u ON u.id = sp.solicitado_por
+            ${where}
+            ORDER BY sp.solicitado_em DESC
+            LIMIT 200
+        `);
+        res.json(resultado.rows);
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ erro: 'Erro ao listar solicitações de plano' });
+    } finally {
+        client.release();
+    }
+});
+
+// GET /superadmin/solicitacoes-plano/:id/comprovante — comprovante enviado
+// junto com a solicitação (mesmo padrão de GET /cobrancas/:id/comprovante).
+router.get('/solicitacoes-plano/:id/comprovante', async (req, res) => {
+    const { id } = req.params;
+    res.set('Cache-Control', 'no-store');
+    const client = await comConexaoSuperAdmin();
+    try {
+        const resultado = await client.query(
+            `SELECT comprovante_base64 FROM solicitacoes_plano WHERE id = $1`,
+            [id]
+        );
+        if (resultado.rows.length === 0 || !resultado.rows[0].comprovante_base64) {
+            return res.status(404).json({ erro: 'Comprovante não encontrado' });
+        }
+        res.json(resultado.rows[0]);
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ erro: 'Erro ao buscar comprovante' });
+    } finally {
+        client.release();
+    }
+});
+
+// PATCH /superadmin/solicitacoes-plano/:id/aprovar — ativa o plano solicitado
+// na associação (vencimento padrão de 30 dias a partir de hoje, mesmo se já
+// tinha um vencimento anterior -- é uma contratação nova).
+router.patch('/solicitacoes-plano/:id/aprovar', async (req, res) => {
+    const { id } = req.params;
+    const client = await comConexaoSuperAdmin();
+    try {
+        await client.query('BEGIN');
+
+        const solicitacao = await client.query(
+            `SELECT id, associacao_id, plano_solicitado, status FROM solicitacoes_plano WHERE id = $1`,
+            [id]
+        );
+        if (solicitacao.rows.length === 0) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ erro: 'Solicitação não encontrada' });
+        }
+        if (solicitacao.rows[0].status !== 'pendente') {
+            await client.query('ROLLBACK');
+            return res.status(409).json({ erro: 'Essa solicitação já foi respondida' });
+        }
+        const { associacao_id, plano_solicitado } = solicitacao.rows[0];
+
+        await client.query(
+            `UPDATE solicitacoes_plano SET status = 'aprovada', respondido_em = now(), respondido_por = $1 WHERE id = $2`,
+            [req.superAdmin.id, id]
+        );
+        const associacao = await client.query(
+            `UPDATE associacoes SET plano = $1, ativo = true, vencimento_assinatura = CURRENT_DATE + interval '30 days'
+             WHERE id = $2 RETURNING nome`,
+            [plano_solicitado, associacao_id]
+        );
+
+        await registrarLogAuditoria(client, {
+            associacaoId: associacao_id, superAdminId: req.superAdmin.id, superAdminNome: req.superAdmin.nome, superAdminEmail: req.superAdmin.email,
+            modulo: 'planos', tipoAcao: 'edicao',
+            descricao: req.superAdmin.nome + ' aprovou a contratação do plano ' + plano_solicitado + ' para "' + associacao.rows[0].nome + '"',
+            dadosNovos: { plano: plano_solicitado }, req,
+        });
+
+        await client.query('COMMIT');
+        res.json({ ok: true });
+    } catch (err) {
+        await client.query('ROLLBACK');
+        console.error(err);
+        res.status(500).json({ erro: 'Erro ao aprovar solicitação' });
+    } finally {
+        client.release();
+    }
+});
+
+// PATCH /superadmin/solicitacoes-plano/:id/rejeitar
+router.patch('/solicitacoes-plano/:id/rejeitar', async (req, res) => {
+    const { id } = req.params;
+    const { motivo } = req.body;
+    const client = await comConexaoSuperAdmin();
+    try {
+        await client.query('BEGIN');
+
+        const solicitacao = await client.query(
+            `SELECT sp.id, sp.status, sp.plano_solicitado, a.nome AS associacao_nome
+             FROM solicitacoes_plano sp JOIN associacoes a ON a.id = sp.associacao_id
+             WHERE sp.id = $1`,
+            [id]
+        );
+        if (solicitacao.rows.length === 0) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ erro: 'Solicitação não encontrada' });
+        }
+        if (solicitacao.rows[0].status !== 'pendente') {
+            await client.query('ROLLBACK');
+            return res.status(409).json({ erro: 'Essa solicitação já foi respondida' });
+        }
+
+        await client.query(
+            `UPDATE solicitacoes_plano
+             SET status = 'rejeitada', respondido_em = now(), respondido_por = $1, observacao_resposta = $2
+             WHERE id = $3`,
+            [req.superAdmin.id, motivo || null, id]
+        );
+
+        await registrarLogAuditoria(client, {
+            associacaoId: null, superAdminId: req.superAdmin.id, superAdminNome: req.superAdmin.nome, superAdminEmail: req.superAdmin.email,
+            modulo: 'planos', tipoAcao: 'edicao',
+            descricao: req.superAdmin.nome + ' rejeitou a contratação do plano ' + solicitacao.rows[0].plano_solicitado + ' para "' + solicitacao.rows[0].associacao_nome + '"',
+            req,
+        });
+
+        await client.query('COMMIT');
+        res.json({ ok: true });
+    } catch (err) {
+        await client.query('ROLLBACK');
+        console.error(err);
+        res.status(500).json({ erro: 'Erro ao rejeitar solicitação' });
+    } finally {
+        client.release();
+    }
+});
+
+// ---------- Configuração de Pix da própria plataforma ----------
+// Chave usada no QR Code que a associação escaneia pra pagar a mensalidade
+// da plataforma (diferente da chave Pix de cada associação, essa é única e
+// global -- ver migration 20260727000000_plano_trial_e_contratacao.sql).
+
+router.get('/configuracoes-plataforma', autorizarSuperAdmin('super_admin'), async (req, res) => {
+    try {
+        const resultado = await pool.query(
+            `SELECT chave_pix, nome_recebedor_pix, cidade_pix FROM configuracoes_plataforma WHERE id = true`
+        );
+        res.json(resultado.rows[0] || {});
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ erro: 'Erro ao buscar configuração da plataforma' });
+    }
+});
+
+router.put('/configuracoes-plataforma', autorizarSuperAdmin('super_admin'), async (req, res) => {
+    const { chave_pix, nome_recebedor_pix, cidade_pix } = req.body;
+
+    if (!chave_pix || !nome_recebedor_pix || !cidade_pix) {
+        return res.status(400).json({ erro: 'chave_pix, nome_recebedor_pix e cidade_pix são obrigatórios' });
+    }
+    if (nome_recebedor_pix.length > 25) {
+        return res.status(400).json({ erro: 'nome_recebedor_pix deve ter no máximo 25 caracteres' });
+    }
+    if (cidade_pix.length > 15) {
+        return res.status(400).json({ erro: 'cidade_pix deve ter no máximo 15 caracteres' });
+    }
+
+    // UPDATE aqui precisa da conexão de bypass -- a policy de UPDATE de
+    // configuracoes_plataforma exige app.superadmin_bypass, senão a query
+    // roda "com sucesso" mas afeta 0 linhas (RLS silenciosamente não acha a
+    // linha pra atualizar).
+    const client = await comConexaoSuperAdmin();
+    try {
+        await client.query(
+            `UPDATE configuracoes_plataforma SET chave_pix = $1, nome_recebedor_pix = $2, cidade_pix = $3, atualizado_em = now() WHERE id = true`,
+            [chave_pix, nome_recebedor_pix, cidade_pix]
+        );
+        await registrarLogAuditoria(client, {
+            superAdminId: req.superAdmin.id, superAdminNome: req.superAdmin.nome, superAdminEmail: req.superAdmin.email,
+            modulo: 'configuracoes', tipoAcao: 'edicao',
+            descricao: req.superAdmin.nome + ' atualizou a configuração de Pix da plataforma',
+            req,
+        });
+        res.json({ ok: true });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ erro: 'Erro ao salvar configuração da plataforma' });
     } finally {
         client.release();
     }

@@ -2,7 +2,7 @@
 // CRUD completo já usando o isolamento por tenant (RLS).
 const express = require('express');
 const bcrypt = require('bcryptjs');
-const { autenticar, bloquearSenhaProvisoria, autorizar, comConexaoTenant } = require('../middleware/auth');
+const { autenticar, bloquearSenhaProvisoria, bloquearTrialExpirado, autorizar, comConexaoTenant } = require('../middleware/auth');
 const { cpfValido, emailValido, gerarSenhaProvisoria } = require('../utils/validacao');
 const { registrarEventoAuth } = require('../utils/authLog');
 const { registrarAtividade } = require('../utils/atividadeLog');
@@ -13,6 +13,7 @@ const router = express.Router();
 // Todas as rotas abaixo exigem estar logado
 router.use(autenticar);
 router.use(bloquearSenhaProvisoria);
+router.use(bloquearTrialExpirado);
 
 // GET /associados — lista os associados da associação do usuário logado (só admin/diretoria)
 router.get('/', autorizar('admin', 'diretoria'), async (req, res) => {
