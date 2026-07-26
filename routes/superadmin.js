@@ -136,8 +136,10 @@ router.use(autenticarSuperAdmin);
 // GET /superadmin/admins — lista os administradores da plataforma
 router.get('/admins', autorizarSuperAdmin('super_admin'), async (req, res) => {
     try {
+        const limite = Math.min(parseInt(req.query.limite, 10) || 100, 1000);
         const resultado = await pool.query(
-            `SELECT id, nome, email, papel, ativo, criado_em FROM super_admins ORDER BY criado_em DESC`
+            `SELECT id, nome, email, papel, ativo, criado_em FROM super_admins ORDER BY criado_em DESC LIMIT $1`,
+            [limite]
         );
         res.json(resultado.rows);
     } catch (err) {
@@ -357,7 +359,7 @@ router.put('/perfil/senha', async (req, res) => {
 // GET /superadmin/associacoes — lista todas as associações com contadores agregados e filtros
 // Toca associados/cobrancas (têm RLS) -> usa conexão de bypass do super-admin
 router.get('/associacoes', async (req, res) => {
-    const { busca, cidade, estado, plano, status } = req.query;
+    const { busca, cidade, estado, plano, status, limite } = req.query;
     const client = await comConexaoSuperAdmin();
     try {
         const condicoes = [];
@@ -383,6 +385,7 @@ router.get('/associacoes', async (req, res) => {
         if (status === 'inativo') condicoes.push(`a.ativo = false`);
 
         const where = condicoes.length ? `WHERE ${condicoes.join(' AND ')}` : '';
+        const limiteSql = limite ? `LIMIT ${Math.min(parseInt(limite, 10), 1000)}` : '';
 
         const resultado = await client.query(`
             SELECT a.id, a.nome, a.tipo, a.email, a.telefone, a.endereco, a.cidade, a.estado, a.cep, a.site, a.cnpj,
@@ -395,6 +398,7 @@ router.get('/associacoes', async (req, res) => {
             FROM associacoes a
             ${where}
             ORDER BY a.criado_em DESC
+            ${limiteSql}
         `, valores);
 
         const hoje = new Date();
@@ -884,13 +888,18 @@ const LIMITE_EXPORTACAO = 5000;
 // GET /superadmin/logs — lista paginada com filtros (qualquer nível de
 // permissão pode consultar; é só leitura)
 router.get('/logs', async (req, res) => {
-    const { pagina, por_pagina, ordenar } = req.query;
+    const { pagina, por_pagina, ordenar, limite: limiteQuery } = req.query;
     const client = await comConexaoSuperAdmin();
     try {
         const { where, valores } = construirFiltrosLogs(req.query);
         const direcao = ordenar === 'asc' ? 'ASC' : 'DESC';
-        const limite = Math.min(parseInt(por_pagina, 10) || 50, 200);
-        const paginaAtual = Math.max(parseInt(pagina, 10) || 1, 1);
+        // Se passou 'limite', usa como atalho pra simples listagem sem paginação;
+        // senão, usa paginação normal com por_pagina/pagina.
+        const usandoLimiteSimples = limiteQuery && !pagina && !por_pagina;
+        const limite = usandoLimiteSimples
+            ? Math.min(parseInt(limiteQuery, 10), 100)
+            : Math.min(parseInt(por_pagina, 10) || 50, 200);
+        const paginaAtual = usandoLimiteSimples ? 1 : Math.max(parseInt(pagina, 10) || 1, 1);
         const offset = (paginaAtual - 1) * limite;
 
         const total = await client.query(
