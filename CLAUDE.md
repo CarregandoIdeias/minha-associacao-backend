@@ -234,6 +234,12 @@ Novas rotas em `routes/superadmin.js`: `GET /superadmin/logs` (filtros: `usuario
 
 `npm install` de `exceljs`/`pdfkit` trouxe ~10 vulnerabilidades transitivas (`brace-expansion`/`glob` dentro da cadeia do `archiver` que o `exceljs` usa pra montar o `.xlsx`) — mesma categoria já aceita como pendência de baixo risco no projeto (ver "Auditoria de escala" abaixo); não achei justificativa pra forçar downgrade do `exceljs` por causa disso.
 
+## Dashboard compacto do Super Admin (Fase 3 da melhoria do Super Admin, 26/07/2026)
+
+Sem migration nem rota nova — só ajustes de compatibilidade em rotas já existentes de `routes/superadmin.js` pra alimentar os 3 cards de "últimas" do Dashboard reformulado (detalhe do front em `painel/CLAUDE.md`): `GET /superadmin/admins` e `GET /superadmin/associacoes` passaram a aceitar `?limite=N` (cap 1000, `LIMIT` direto na query) pra listagens curtas sem precisar de paginação de verdade; `GET /superadmin/logs` passou a aceitar `?limite=N` como atalho — se vier sozinho (sem `pagina`/`por_pagina`), usa esse valor como `LIMIT` simples (cap 100) em vez do fluxo normal de paginação.
+
+**Bug real desta fase, só no front, sem nenhuma mudança de backend envolvida**: a reforma do Dashboard removeu elementos do HTML (`<canvas>` de receita/planos, painel de alertas) mas deixou código JS ainda referenciando os ids removidos — `getElementById` retornando `null` lançava exceção no meio do `.then()` de `carregarDashboard()`, impedindo tudo que vinha depois (as 3 chamadas de "últimas") de executar. Corrigido só em `superadmin.html`, nenhuma rota de backend precisou mudar. Detalhe completo em `painel/CLAUDE.md`, seção "Dashboard compacto e menu mobile".
+
 ## Isolamento entre tenants (RLS) — já está ativo
 
 Não é só disciplina de código (`WHERE associacao_id = $1` em toda query,
