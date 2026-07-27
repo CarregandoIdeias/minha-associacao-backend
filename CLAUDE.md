@@ -110,43 +110,165 @@ aconteceu nesta sessão (trocado por engano achando que corrigiria um bug,
 revertido em minutos). Se for mexer nessa variável de novo: confirmar
 antes que o ambiente de destino suporta IPv6, ou usar sempre o pooler.
 
-## Instabilidade intermitente conhecida, ainda não resolvida (25/07/2026)
+## Instabilidade intermitente do pooler — causa encontrada e mitigada (26-27/07/2026)
 
 De vez em quando (mais depois de reconexões "a frio", ex. após um período
-ocioso), `autenticar()` e a query de login do backend recebem do Postgres
+ocioso), `autenticar()` e a query de login do backend recebiam do Postgres
 `invalid input syntax for type uuid: ""` (`code: 22P02`) — inclusive em
-consultas que **não têm nenhum parâmetro uuid** (a query de login só
-compara e-mail). Isso é evidência forte de que é a resposta de **outra**
-query concorrente vazando pela conexão (algo do lado do pooler do
-Supabase, Session Pooler confirmado — não é bug óbvio no nosso código).
-Não foi possível reproduzir de forma controlada (nem com 225+ chamadas
-concorrentes simuladas direto contra o pooler).
+consultas com um parâmetro uuid válido, o que só é possível se a conexão
+estiver recebendo uma resposta de **outra** query (algo do lado do pooler
+do Supabase, Session Pooler confirmado).
 
-**Mitigações já aplicadas** (não resolvem a causa raiz, deixam o sistema
-se recuperar sozinho na maioria dos casos):
+**27/07/2026 — piorou de "raro" para ~100% das requisições, causa
+identificada**: no dia anterior, `db.js` ganhou `statement_timeout: 20000`
+no config do `Pool`. Isso **não vira um `SET` depois de conectar** — vira
+parâmetro do próprio pacote de *startup* da conexão
+(`node_modules/pg/lib/client.js:549`, `data.statement_timeout = ...`
+mandado junto do handshake inicial). Tudo indica que o Session Pooler do
+Supabase (PgBouncer) não repassa esse parâmetro de startup do jeito
+esperado pro backend Postgres, deixando a conexão num estado inconsistente
+desde a abertura — e como toda rota abre uma conexão nova a cada request
+(por causa do isolamento por tenant via `SET` de sessão), isso afetava
+praticamente toda chamada autenticada. **Removido.** Se precisar de um
+timeout de statement no futuro, aplicar via `SET statement_timeout = ...`
+numa query separada logo após conectar (dentro de
+`comConexaoComSessao`), nunca via essa opção do `Pool`/`Client`.
+
+Isso não invalida a suspeita original de "resposta de outra query vazando
+pela conexão" — é bem possível que sejam a mesma classe de bug
+(protocolo/estado da conexão ficando dessincronizado com o PgBouncer), só
+que o `statement_timeout` no startup packet tornou a condição que dispara
+o problema muito mais fácil de acontecer. Com ele removido, o sintoma
+voltou a ser raro (mesmo comportamento de antes de 26/07).
+
+**Mitigações permanentes que continuam valendo**:
 - `db.js`: `pool.on('error', ...)` — sem isso, um cliente ocioso derrubado
   pelo Supabase gerava um evento `'error'` não tratado que **derrubava o
-  processo Node inteiro**, causando 500 em rajada em várias rotas ao mesmo
-  tempo até o Render reiniciar sozinho. Esse era o bug mais grave e está
-  corrigido.
-- `middleware/auth.js` (`autenticar`): guarda de UUID antes de consultar
-  (`payload.id` inválido → 401 limpo, não 500) + retry de uma tentativa
-  com conexão nova antes de desistir.
-- `routes/auth.js` (`buscarUsuarioPorEmail`, usado por `POST
-  /auth/login`): mesmo retry de uma tentativa.
+  processo Node inteiro**.
+- `middleware/auth.js`: `comConexaoComSessao()` — toda conexão com estado
+  de sessão (`comConexaoTenant`/`SuperAdmin`/`Auth`) passa por aqui. Se o
+  `SET` inicial falhar, a conexão é destruída com `client.release(err)`
+  (nunca volta pro pool nesse estado) e a operação tenta de novo uma vez
+  com uma conexão nova.
+- `autenticar()`: guarda de UUID antes de consultar (`payload.id` inválido
+  → 401 limpo, não 500) + retry de uma tentativa própria, em cima do retry
+  de `comConexaoComSessao`.
+- `server.js`: `express-async-errors` + error handler global — nenhuma
+  rota pode mais terminar **sem responder nada** (ver seção abaixo, esse
+  era um bug maior que a instabilidade do pooler em si).
 
-**Se voltar a acontecer em uso real** (não sob teste de carga pesado — ver
-nota de cuidado abaixo): registrar o erro exato do log do Render com
-horário e considerar abrir chamado com o suporte do Supabase citando esse
-erro (`22P02`, `string_to_uuid`, parâmetro vazio em query sem parâmetro
-uuid).
+**Se voltar a acontecer**: pegar o erro exato do log do Render (o
+`console.error(err)` de `autenticar()`/error handler mostra a query e o
+código `22P02`) e considerar abrir chamado com o suporte do Supabase.
 
 **Cuidado ao investigar**: testes de diagnóstico pesados (dezenas/centenas
-de conexões em sequência rápida) contra a produção podem eles mesmos
-causar ou piorar a instabilidade, possivelmente por esgotar conexões do
-pooler — isso aconteceu nesta sessão. Preferir testes leves (uma
-requisição de cada vez, espaçadas) ao investigar esse sintoma
-especificamente.
+de conexões em sequência rápida) contra produção podem eles mesmos causar
+ou piorar a instabilidade. Preferir requisições sequenciais e espaçadas ao
+investigar esse sintoma especificamente — foi assim que a causa de 27/07
+foi encontrada (comparação direta: mesma query, mesmo `db.js`, rodando
+localmente contra o mesmo banco de produção funcionava 100% das vezes;
+só falhava vindo do processo do Render, o que descartou hipóteses de
+dado/query e apontou pra configuração específica da conexão).
+
+## Requisição nunca mais fica pendurada sem resposta (27/07/2026)
+
+Achado durante a investigação acima, mas é um bug maior e independente:
+no Express 4, uma exceção lançada dentro de um handler `async` **não vira
+resposta de erro** — vira uma rejeição de Promise não tratada. Como toda
+rota faz `const client = await comConexaoX()` **antes** do `try`, se essa
+linha lançasse (ex.: pool entregando uma conexão que o Supabase já tinha
+derrubado por ociosidade), a exceção nunca chegava a um `catch`: a
+requisição ficava pendurada até o navegador desistir sozinho, sem status
+HTTP nenhum. Sintoma pro usuário: "o sistema trava/fica instável", sem
+nenhum erro visível — bem mais confuso de diagnosticar que um 500 comum.
+
+Corrigido com duas camadas:
+- `express-async-errors` (require logo depois de `require('express')` em
+  `server.js`) — faz exceção assíncrona chegar no error handler do
+  Express, que sozinho só pega erro síncrono.
+- Error handler global no fim de `server.js` — sempre devolve
+  `{ erro: 'Erro interno do servidor' }` com status 500 se nada mais
+  respondeu. Rede de segurança para qualquer rota que ainda não trate um
+  erro específico.
+
+`db.js` ganhou `connectionTimeoutMillis: 10000` (só client-side, um timer
+local — não manda nada a mais pro servidor, seguro com o Session Pooler)
+para `pool.connect()` falhar com erro claro em vez de esperar pra sempre
+quando o pool está cheio.
+
+## Rate limit geral por IP (27/07/2026)
+
+`limiteGeral` (`middleware/rateLimiter.js`) subiu de 300 para 1000
+requisições por 15 min. O limite é por IP, e várias pessoas da mesma
+associação normalmente saem pelo mesmo IP (mesma rede/escritório) — elas
+dividem essa cota. Só abrir o Dashboard já dispara ~5 chamadas em
+paralelo; multiplicado por várias pessoas trocando de aba ao mesmo tempo,
+300 esgotava rápido e virava 429 confundido com instabilidade. Login e
+redefinição de senha continuam com limites próprios e bem mais rígidos
+(`limiteLogin`/`limiteRedefinicao`), que é onde o controle de força bruta
+realmente importa — não foram tocados.
+
+## Auditoria de segurança — XSS armazenado e permissões (27/07/2026)
+
+Achados numa análise de segurança pedida pelo usuário, confirmados com PoC
+antes de corrigir (não só suposição):
+
+**Crítico — XSS armazenado, corrigido em duas camadas.** A validação de
+upload (`comprovante_base64`, `foto_base64`, `logo_base64`) era só um
+`startsWith('data:image/')` — o resto da string era livre. Como o
+front-end (`painel/*.html`) montava `<img src="...">` por concatenação, um
+valor com aspas escapava do atributo: um comprovante enviado por um
+cliente executava script na sessão de quem abrisse a tela (ex.: um admin
+de associação sobe um comprovante malicioso na contratação de plano → o
+Super Admin abre pra aprovar → script roda com o JWT do Super Admin no
+`localStorage` → acesso a todas as associações). Confirmado rodando o
+payload de verdade num PoC isolado antes de corrigir.
+
+Corrigido com:
+- `utils/validacao.js`: `dataUrlValido()`/`imagemBase64Valida()`/
+  `comprovanteBase64Valido()` — exige alfabeto base64 estrito (sem aspas,
+  `<`, `>` possíveis) e MIME de uma lista fechada (PNG/JPEG/GIF/WEBP/PDF
+  conforme o caso). **SVG é rejeitado de propósito** — é vetor de XSS
+  (pode conter `<script>`), mesmo sendo tecnicamente uma "imagem".
+  Aplicado em `routes/plano.js`, `routes/portal.js`, `routes/superadmin.js`
+  (logo da associação).
+- Front-end (`painel/CLAUDE.md` tem o detalhe): parou de montar HTML por
+  concatenação nesses pontos, usa `createElement` + `.src`/`.href`.
+
+As duas camadas existem de propósito — mesmo que um sink novo apareça no
+front no futuro, o dado gravado no banco já não pode carregar um ataque.
+
+**Alto — senha provisória de super-admin nunca expirava de fato.**
+`autenticarSuperAdmin` não checava `deve_trocar_senha` (só o front-end
+mostrava o modal de troca obrigatória). Agora bloqueia toda a API com 403
+`SENHA_PROVISORIA_PENDENTE`, liberando só `PUT /perfil/senha` — mesmo
+padrão que já existia pros usuários de associação
+(`bloquearSenhaProvisoria`).
+
+**Alto — papel `suporte` tinha poder demais.** Só `/admins/*` e
+`/configuracoes-plataforma` checavam nível de permissão; na prática
+`suporte` conseguia `DELETE /associacoes/:id` (apaga em cascata) e
+`PATCH .../resetar-senha-admin` (toma conta de qualquer cliente,
+recebendo a senha nova na resposta). Modelo de menor privilégio novo em
+`routes/superadmin.js` (constante `GESTAO = ['super_admin',
+'administrador']`): exclusão de associação exige `super_admin`; criar/
+editar associação, resetar senha de cliente, aprovar/rejeitar contratação
+e exportar logs em massa exigem `GESTAO`; `suporte` mantém acesso de
+leitura a tudo (dashboard, associações, logs).
+
+**Médio**: `helmet` adicionado em `server.js` (HSTS, `nosniff`,
+`frame-options`, remove `X-Powered-By`). CSP equivalente em
+`painel/vercel.json` (detalhe em `painel/CLAUDE.md`).
+
+**Pendências dessa análise, não corrigidas ainda** (prioridade menor):
+falsificação do log de auditoria (o nome exibido nas descrições vem de
+`req.usuario.nome`, sem restrição de conteúdo), formula injection no
+Excel exportado por `utils/exportarLogs.js` (nome/descrição com `=...`
+vira fórmula ativa ao abrir), JWT não é invalidado ao trocar senha
+(token roubado continua válido até expirar, até 8h), 10 vulnerabilidades
+de dependências (`npm audit`, cadeia `exceljs → archiver → glob`), race
+condition em `POST /plano/solicitar-contratacao` (checagem de pendente e
+INSERT não são atômicos).
 
 ## Auditoria de escala (25/07/2026)
 
