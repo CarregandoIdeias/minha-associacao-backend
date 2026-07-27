@@ -9,7 +9,7 @@ const express = require('express');
 const { autenticar, bloquearSenhaProvisoria, autorizar, comConexaoTenant } = require('../middleware/auth');
 const { registrarLogAuditoria } = require('../utils/auditoria');
 const { comprovanteBase64Valido } = require('../utils/validacao');
-const { calcularValorMensalidade, statusAssinatura } = require('../utils/precos');
+const { calcularValorMensalidade, statusAssinatura, alertaAssinatura } = require('../utils/precos');
 
 const router = express.Router();
 router.use(autenticar);
@@ -26,7 +26,7 @@ router.get('/', autorizar('admin', 'diretoria'), async (req, res) => {
     try {
         const associacao = await client.query(
             `SELECT plano, ativo, trial_dias, trial_expira_em, vencimento_assinatura,
-                    valor_mensalidade_manual, dias_alerta_vencimento
+                    valor_mensalidade_manual, dias_alerta_vencimento, dias_alerta_assinatura
              FROM associacoes WHERE id = $1`,
             [req.usuario.associacao_id]
         );
@@ -61,6 +61,7 @@ router.get('/', autorizar('admin', 'diretoria'), async (req, res) => {
             valor_mensalidade: calcularValorMensalidade(a.plano, total, a.valor_mensalidade_manual),
             total_associados: total,
             status: statusAssinatura(a),
+            alerta: alertaAssinatura(a),
             pix_plataforma: pixPlataforma.rows[0] || { chave_pix: null, nome_recebedor_pix: null, cidade_pix: null },
             solicitacao_pendente: solicitacaoPendente.rows[0] || null,
         });

@@ -14,6 +14,9 @@ const { calcularValorMensalidade, statusAssinatura } = require('../utils/precos'
 const { gerarExcelLogs, gerarPdfLogs } = require('../utils/exportarLogs');
 
 const FORMAS_COBRANCA_VALIDAS = ['pix', 'boleto', 'cartao', 'dinheiro', 'outro'];
+// Opções fechadas (não é um intervalo livre) -- pedido explícito do item de
+// sprint 1.4, pra manter o dropdown do formulário previsível.
+const DIAS_ALERTA_ASSINATURA_VALIDOS = [30, 20, 15, 10, 7, 3];
 const PAPEIS_SUPERADMIN_VALIDOS = ['super_admin', 'administrador', 'suporte'];
 
 // Modelo de permissão dos níveis da plataforma (menor privilégio):
@@ -688,7 +691,7 @@ router.post('/associacoes', autorizarSuperAdmin(...GESTAO), async (req, res) => 
     const {
         nome_associacao, tipo, email, telefone, endereco, cidade, estado, cep, site, cnpj, logo_base64,
         nome_admin, cpf,
-        plano, valor_mensalidade_manual, vencimento_assinatura, forma_cobranca, trial_dias
+        plano, valor_mensalidade_manual, vencimento_assinatura, forma_cobranca, trial_dias, dias_alerta_assinatura
     } = req.body;
 
     if (!nome_associacao || !nome_admin || !email) {
@@ -706,6 +709,10 @@ router.post('/associacoes', autorizarSuperAdmin(...GESTAO), async (req, res) => 
     const diasTrial = trial_dias ? parseInt(trial_dias, 10) : 15;
     if (isNaN(diasTrial) || diasTrial < 1 || diasTrial > 365) {
         return res.status(400).json({ erro: 'trial_dias deve ser um número entre 1 e 365' });
+    }
+    const diasAlertaAssinatura = dias_alerta_assinatura ? parseInt(dias_alerta_assinatura, 10) : 30;
+    if (!DIAS_ALERTA_ASSINATURA_VALIDOS.includes(diasAlertaAssinatura)) {
+        return res.status(400).json({ erro: 'dias_alerta_assinatura deve ser um destes valores: ' + DIAS_ALERTA_ASSINATURA_VALIDOS.join(', ') });
     }
     if (logo_base64 && !imagemBase64Valida(logo_base64)) {
         return res.status(400).json({ erro: 'Logo inválida. Envie PNG, JPG, GIF ou WEBP.' });
@@ -731,13 +738,13 @@ router.post('/associacoes', autorizarSuperAdmin(...GESTAO), async (req, res) => 
         const associacao = await client.query(
             `INSERT INTO associacoes (nome, tipo, email, telefone, endereco, cidade, estado, cep, site, cnpj, logo_url,
                                        plano, valor_mensalidade_manual, vencimento_assinatura, forma_cobranca,
-                                       trial_dias, trial_expira_em)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+                                       trial_dias, trial_expira_em, dias_alerta_assinatura)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
              RETURNING id`,
             [nome_associacao, tipo || 'outra', email, telefone || null, endereco || null, cidade || null, estado || null,
                 cep || null, site || null, cnpj || null, logo_base64 || null,
                 planoFinal, valor_mensalidade_manual || null, vencimento_assinatura || null, forma_cobranca || null,
-                diasTrial, trialExpiraEm]
+                diasTrial, trialExpiraEm, diasAlertaAssinatura]
         );
         const associacaoId = associacao.rows[0].id;
 
@@ -788,7 +795,8 @@ router.put('/associacoes/:id', autorizarSuperAdmin(...GESTAO), async (req, res) 
     const { id } = req.params;
     const {
         nome, tipo, email, telefone, endereco, cidade, estado, cep, site, cnpj, logo_base64, ativo,
-        plano, valor_mensalidade_manual, vencimento_assinatura, forma_cobranca, cpf, trial_dias, trial_expira_em
+        plano, valor_mensalidade_manual, vencimento_assinatura, forma_cobranca, cpf, trial_dias, trial_expira_em,
+        dias_alerta_assinatura
     } = req.body;
 
     if (!nome || !nome.trim()) {
@@ -803,6 +811,10 @@ router.put('/associacoes/:id', autorizarSuperAdmin(...GESTAO), async (req, res) 
     if (trial_dias !== undefined && trial_dias !== null && (isNaN(parseInt(trial_dias, 10)) || trial_dias < 1 || trial_dias > 365)) {
         return res.status(400).json({ erro: 'trial_dias deve ser um número entre 1 e 365' });
     }
+    if (dias_alerta_assinatura !== undefined && dias_alerta_assinatura !== null
+        && !DIAS_ALERTA_ASSINATURA_VALIDOS.includes(parseInt(dias_alerta_assinatura, 10))) {
+        return res.status(400).json({ erro: 'dias_alerta_assinatura deve ser um destes valores: ' + DIAS_ALERTA_ASSINATURA_VALIDOS.join(', ') });
+    }
     if (logo_base64 && !imagemBase64Valida(logo_base64)) {
         return res.status(400).json({ erro: 'Logo inválida. Envie PNG, JPG, GIF ou WEBP.' });
     }
@@ -814,7 +826,7 @@ router.put('/associacoes/:id', autorizarSuperAdmin(...GESTAO), async (req, res) 
         const anterior = await client.query(
             `SELECT nome, tipo, email, telefone, endereco, cidade, estado, cnpj, ativo,
                     cep, site, plano, valor_mensalidade_manual, vencimento_assinatura, forma_cobranca,
-                    trial_dias, trial_expira_em
+                    trial_dias, trial_expira_em, dias_alerta_assinatura
              FROM associacoes WHERE id = $1`,
             [id]
         );
@@ -830,15 +842,16 @@ router.put('/associacoes/:id', autorizarSuperAdmin(...GESTAO), async (req, res) 
                  cep = $10, site = $11, logo_url = COALESCE($12, logo_url),
                  plano = COALESCE($13, plano), valor_mensalidade_manual = $14,
                  vencimento_assinatura = $15, forma_cobranca = $16,
-                 trial_dias = COALESCE($18, trial_dias), trial_expira_em = COALESCE($19, trial_expira_em)
+                 trial_dias = COALESCE($18, trial_dias), trial_expira_em = COALESCE($19, trial_expira_em),
+                 dias_alerta_assinatura = COALESCE($20, dias_alerta_assinatura)
              WHERE id = $17
              RETURNING id, nome, tipo, email, telefone, endereco, cidade, estado, cnpj, ativo,
                        cep, site, logo_url, plano, valor_mensalidade_manual, vencimento_assinatura, forma_cobranca,
-                       trial_dias, trial_expira_em`,
+                       trial_dias, trial_expira_em, dias_alerta_assinatura`,
             [nome.trim(), tipo || null, email || null, telefone || null, endereco || null, cidade || null, estado || null, cnpj || null, ativo,
                 cep || null, site || null, logo_base64 || null,
                 plano || null, valor_mensalidade_manual || null, vencimento_assinatura || null, forma_cobranca || null, id,
-                trial_dias || null, trial_expira_em || null]
+                trial_dias || null, trial_expira_em || null, dias_alerta_assinatura ? parseInt(dias_alerta_assinatura, 10) : null]
         );
 
         if (cpf) {

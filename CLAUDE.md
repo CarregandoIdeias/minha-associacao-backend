@@ -452,6 +452,31 @@ sensível de dado de cliente). `tipo` (`melhoria`/`bug`), `prioridade`
 (`baixa`/`media`/`alta`/`urgente`), `status`
 (`pendente`/`em_andamento`/`concluido`/`cancelado`) são enums novos.
 
+## Alerta inteligente de renovação do plano (item de sprint 1.4, 27/07/2026)
+
+`associacoes` ganhou `dias_alerta_assinatura` (migration
+`20260727140000_alerta_vencimento_assinatura.sql`, aditiva, default 30) —
+configurável só pelo Super Admin, por associação, num select fechado
+(`30/20/15/10/7/3`, `DIAS_ALERTA_ASSINATURA_VALIDOS` em
+`routes/superadmin.js`, validado no `POST`/`PUT /associacoes`). **Não
+confundir com `dias_alerta_vencimento`**, coluna mais antiga e
+semanticamente diferente: essa é sobre cobranças pendentes dos
+*associados* de cada associação (mensalidades), configurada pela própria
+associação em Configurações; a nova é sobre o vencimento da *assinatura da
+associação com a plataforma*.
+
+`utils/precos.js` ganhou `alertaAssinatura(associacao, hoje)` — devolve
+`null` fora da janela configurada (nada a mostrar), ou
+`{ tipo: 'trial'|'assinatura', dias_restantes, nivel }` com `nivel`
+escalando `atencao` → `alerta` → `critico` conforme a proximidade do
+vencimento (`critico` quando `dias_restantes <= 0`, ou sempre nos últimos
+3 dias de trial). Independente de `statusAssinatura()` (que já existia e
+continua só usando `dias_alerta_vencimento` pra rotular a linha na lista
+do Super Admin — não foi tocada). `GET /plano` (`routes/plano.js`) devolve
+esse objeto em `alerta`; o card `#bloco-plano-dashboard` em
+`painel/index.html` usa isso pra decidir mensagem, cor e se pulsa — ver
+`painel/CLAUDE.md`.
+
 ## Isolamento entre tenants (RLS) — já está ativo
 
 Não é só disciplina de código (`WHERE associacao_id = $1` em toda query,
