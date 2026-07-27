@@ -114,6 +114,38 @@ em produção de verdade. Pra recriar o schema nele do zero:
    backend de staging pra criar o primeiro super-admin desse ambiente —
    com `BOOTSTRAP_SECRET` próprio de staging, diferente do de produção.
 
+**⚠️ Armadilha real, descoberta montando o staging em 27/07/2026: NÃO cole
+todas as migrations de uma vez só numa única query no SQL Editor do
+Supabase.** Rodamos um arquivo único concatenando as 12 migrations em
+ordem (pensado só pra economizar cliques) e o editor mostrou "Success" —
+mas na prática **só a primeira migration (`baseline_schema.sql`) foi
+aplicada de verdade**; as outras 11 foram silenciosamente ignoradas, sem
+nenhum erro visível. Só percebemos porque o login do super-admin quebrou
+depois (coluna `papel` inexistente) e, ao listar as tabelas de fato
+criadas, só as 8 do baseline apareciam. A suspeita é que o aviso "This
+query creates tables without enabling Row Level Security" (que aparece
+quando a query tem `CREATE TABLE` sem `ENABLE ROW LEVEL SECURITY` na
+mesma instrução) interrompe a execução do restante do script ao ser
+resolvido, mesmo escolhendo "Run without RLS". **A forma seguem é rodar
+cada arquivo de migration separadamente, um de cada vez, conferindo
+"Success" antes de ir pro próximo** — exatamente como a lista acima já
+recomendava antes desse achado, só que agora sabemos por quê é obrigatório
+e não só uma boa prática.
+
+**Outra lacuna real encontrada no mesmo processo**: as colunas
+`cidade`/`estado` de `associacoes` (usadas em `routes/superadmin.js` desde
+a reforma de 24/07/2026) nunca tinham migration nenhuma — foram
+adicionadas direto em produção, fora do controle de versão, e só
+apareceram como erro (`column a.cidade does not exist`) ao recriar o
+schema do zero. Corrigido em
+`20260727120000_cidade_estado_associacoes.sql`. **Isso é o segundo caso
+desse tipo** (o primeiro foi a role `app_runtime`) — um lembrete de que
+o schema real de produção pode ter mudanças pontuais feitas direto no SQL
+Editor que nunca viraram migration versionada. Se aparecer um terceiro
+caso, vale considerar rodar um dump de schema (`pg_dump --schema-only`) de
+produção pra comparar com o que está nesta pasta, em vez de só confiar que
+está tudo capturado aqui.
+
 Staging e produção **nunca compartilham role, senha, `JWT_SECRET` ou
 `BOOTSTRAP_SECRET`** — são projetos totalmente independentes, só o *schema*
 é o mesmo.

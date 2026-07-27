@@ -47,11 +47,33 @@ quando fizer sentido, a critério do usuário.
 raciocínio já documentado abaixo sobre local vs Render: um token assinado
 num ambiente não pode ser aceito no outro.
 
+**Runbook resumido pra recriar o backend de staging do zero** (o banco em
+si está detalhado em `supabase/README.md`):
+1. Supabase: novo projeto, com **"Enable Data API"**, **"Automatically
+   expose new tables"** e **"Enable automatic RLS"** todos desmarcados na
+   criação (não usamos a API própria do Supabase, e o schema já liga RLS
+   manualmente tabela por tabela — automático quebraria `super_admins`,
+   que é sem RLS de propósito).
+2. Render: novo Web Service, branch `staging` deste repositório, nome
+   `minha-associacao-backend-staging` (esse nome exato importa — é o que
+   `painel/*.html` chama automaticamente ao detectar hostname de staging).
+   Env vars: `DATABASE_URL` (pooler + role `app_runtime` de staging),
+   `JWT_SECRET` (novo, `openssl rand -hex 32`), `CORS_ORIGINS` (domínio do
+   painel de staging), `BOOTSTRAP_SECRET` (temporário, só pra criar o
+   primeiro super-admin).
+3. Depois do deploy, criar o primeiro super-admin com
+   `POST /superadmin/bootstrap` (`nome`, `email`, `senha`,
+   `bootstrap_secret` no corpo) — ver `routes/superadmin.js`.
+4. Ver `painel/CLAUDE.md` pra a parte do Vercel (front-end).
+
 ## Regra mais importante deste repositório
 
-**O banco de produção (Supabase) é o mesmo banco que o desenvolvimento
-local usa — não existe staging separado.** Qualquer migração/teste local
-com um `DATABASE_URL` real afeta produção diretamente. Migrações
+**Desde 27/07/2026 existe staging (ver seção acima) — mas se você estiver
+rodando algo localmente (`node server.js` na sua máquina) com uma
+`DATABASE_URL` copiada de algum lugar, confirme QUAL projeto Supabase é
+antes de rodar qualquer coisa.** Continua não existindo um "terceiro
+banco" para desenvolvimento local: rodar local com a `DATABASE_URL` de
+produção afeta produção diretamente; usar a de staging é seguro. Migrações
 aditivas (novas tabelas/colunas/policies sem `FORCE`) são seguras a
 qualquer momento; mudanças que afetam quem já está conectado (trocar
 `DATABASE_URL` em produção, `FORCE ROW LEVEL SECURITY`) precisam ser
