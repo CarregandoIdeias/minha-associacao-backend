@@ -30,10 +30,20 @@ const pool = new Pool({
     // requisição fica pendurada sem erro nenhum (parece "o sistema travou").
     // Com timeout, vira um erro claro, que agora o error handler de server.js
     // converte em 500 -- ruim, mas diagnosticável e sem prender o navegador.
+    // (Só client-side -- um setTimeout local, não manda nada a mais pro
+    // servidor -- por isso é seguro mesmo com o Session Pooler.)
     connectionTimeoutMillis: 10000,
-    // Corta query que trava (lock, rede ruim) em vez de segurar a conexão do
-    // pool indefinidamente, o que acabaria esgotando o pool inteiro.
-    statement_timeout: 20000,
+    // REMOVIDO (26/07/2026): `statement_timeout` aqui vira parâmetro do
+    // pacote de STARTUP da conexão (node_modules/pg/lib/client.js, não um
+    // `SET` depois de conectar). Coincidiu com autenticar() passar a falhar
+    // ~100% das vezes em produção com "invalid input syntax for type uuid:
+    // ''" -- o sintoma documentado de "resposta de outra query vazando pela
+    // conexão" (ver CLAUDE.md, sessão 25/07), só que virando praticamente
+    // sempre em vez de raro. Suspeita: o Session Pooler do Supabase
+    // (PgBouncer) não repassa esse parâmetro de startup do jeito esperado
+    // pro backend, deixando a conexão num estado inconsistente desde a
+    // abertura. Voltar a usar SET statement_timeout por conexão, depois de
+    // conectar, se precisar reintroduzir -- não pelo startup packet.
 });
 
 // Sem esse listener, um cliente ocioso no pool que tenha a conexão encerrada
