@@ -64,6 +64,25 @@ router.put('/pix', autorizar('admin'), async (req, res) => {
     }
 });
 
+// GET /configuracoes/identidade — nome e logo da própria associação, pra
+// exibir no cabeçalho do Dashboard (ver painel/index.html). Qualquer usuário
+// autenticado pode ler, mesmo padrão de /pix.
+router.get('/identidade', async (req, res) => {
+    const client = await comConexaoTenant(req.usuario.associacao_id);
+    try {
+        const resultado = await client.query(
+            `SELECT nome, logo_url FROM associacoes WHERE id = $1`,
+            [req.usuario.associacao_id]
+        );
+        res.json(resultado.rows[0] || {});
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ erro: 'Erro ao buscar identidade da associação' });
+    } finally {
+        client.release();
+    }
+});
+
 // GET /configuracoes/alertas — qualquer usuário autenticado pode ler
 router.get('/alertas', async (req, res) => {
     const client = await comConexaoTenant(req.usuario.associacao_id);
