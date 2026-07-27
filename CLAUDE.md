@@ -11,6 +11,42 @@ associações — Super Admin cadastra associações-clientes, cada uma com seu
 admin/diretoria/associados isolados das outras. Front-end em
 `../painel` (HTML/JS puro, repositório separado), consome essa API.
 
+## Ambiente de homologação (staging) — novo (27/07/2026)
+
+Até aqui só existia produção (ver seção seguinte). Passou a existir um
+segundo ambiente completo, isolado, pra testar mudanças arriscadas antes de
+chegar em produção:
+
+- **Banco**: projeto Supabase próprio (novo, vazio), sem nenhuma relação com
+  o de produção. Schema recriado do zero rodando, nessa ordem, a role
+  `app_runtime` (script reconstruído manualmente — a criação original nunca
+  foi versionada, ver `supabase/README.md`) e depois todas as migrations de
+  `supabase/migrations/*.sql` em ordem cronológica.
+- **Backend**: segundo Web Service no Render (`minha-associacao-backend-staging`
+  ou nome equivalente), deploy a partir da branch `staging` deste
+  repositório (não `main`) — mesmo código, `DATABASE_URL`/`JWT_SECRET`/
+  `CORS_ORIGINS`/`BOOTSTRAP_SECRET` próprios, apontando pro Supabase de
+  staging.
+- **Front-end**: `painel/*.html` (branch `staging` do repo `painel`) resolve
+  `API_URL` automaticamente pelo hostname (`location.hostname`) — em vez de
+  valor fixo, localhost e o domínio de staging na Vercel usam o backend de
+  staging; qualquer outro hostname (produção) usa o backend de produção.
+  Isso existe assim de propósito: **não há divergência de código entre
+  `main` e `staging`** nesse ponto, então mesclar uma branch na outra nunca
+  arrisca "esquecer de reverter uma URL", como já tinha acontecido antes
+  (ver nota em `painel/CLAUDE.md`).
+
+**Fluxo de trabalho**: mudanças arriscadas (schema novo, RLS, mudança de
+comportamento de auth) são testadas primeiro na branch `staging` — só
+depois de validado ali, `staging` é mesclada em `main`, e o push pra `main`
+segue exigindo confirmação explícita antes (já era assim, continua sendo).
+Migrations aditivas simples continuam podendo ir direto pra produção
+quando fizer sentido, a critério do usuário.
+
+**JWT_SECRET de staging precisa ser diferente do de produção** — mesmo
+raciocínio já documentado abaixo sobre local vs Render: um token assinado
+num ambiente não pode ser aceito no outro.
+
 ## Regra mais importante deste repositório
 
 **O banco de produção (Supabase) é o mesmo banco que o desenvolvimento

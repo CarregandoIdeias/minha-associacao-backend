@@ -74,6 +74,31 @@ GROUP BY grantee;
 `app_runtime` deve aparecer com `SELECT,INSERT,UPDATE,DELETE`;
 `anon`/`authenticated` não devem aparecer.
 
+## Ambiente de homologação (staging) — novo (27/07/2026)
+
+Passou a existir um segundo projeto Supabase, vazio e isolado do de
+produção, usado só para testar migrations/mudanças de RLS antes de aplicar
+em produção de verdade. Pra recriar o schema nele do zero:
+
+1. Criar a role `app_runtime` primeiro — **não está em nenhum arquivo desta
+   pasta**, porque a criação original em produção nunca foi versionada (uma
+   lacuna real, não só falta de vontade). Script reconstruído a partir dos
+   grants documentados abaixo, entregue à parte (fora do controle de
+   versão, porque contém a senha da role).
+2. Rodar todos os arquivos desta pasta em ordem cronológica (nome do
+   arquivo já é a ordem). Isso inclui `20260722000000_baseline_schema.sql`
+   — o aviso "não execute em produção" vale só pra produção, que já tinha
+   essas tabelas; num projeto novo e vazio, esse arquivo faz parte do
+   schema inteiro.
+3. Conferir os grants de `app_runtime` (query no fim deste arquivo).
+4. Rodar `POST /superadmin/bootstrap` (ver `routes/superadmin.js`) contra o
+   backend de staging pra criar o primeiro super-admin desse ambiente —
+   com `BOOTSTRAP_SECRET` próprio de staging, diferente do de produção.
+
+Staging e produção **nunca compartilham role, senha, `JWT_SECRET` ou
+`BOOTSTRAP_SECRET`** — são projetos totalmente independentes, só o *schema*
+é o mesmo.
+
 ## Antes de aplicar uma migration em produção
 
 1. Faça backup do banco no Supabase (ou ao menos confirme que a mudança é
