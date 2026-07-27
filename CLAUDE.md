@@ -376,6 +376,24 @@ Migration `20260727000000_plano_trial_e_contratacao.sql`: `associacoes` ganhou `
 
 Novas rotas em `routes/superadmin.js`: `GET /solicitacoes-plano` (`?status=pendente|todas`), `GET /solicitacoes-plano/:id/comprovante`, `PATCH .../aprovar`, `PATCH .../rejeitar`, `GET`/`PUT /configuracoes-plataforma` (só `papel: 'super_admin'`). Dashboard (`GET /superadmin/dashboard`) ganhou `solicitacoes_pendentes_plano` e um alerta quando > 0. `POST`/`PUT /associacoes` aceitam `trial_dias` agora (cap 1-365 dias).
 
+## Backlog de sprint (melhorias/bugs) — novo (27/07/2026)
+
+Nova tabela de nível de plataforma `sprint_itens` (migration
+`20260727100000_sprint_itens.sql`) — o usuário (Julião) registra
+melhorias/bugs pela tela nova `painel/sprint.html`, e uma sessão de IA lê
+esse backlog (`GET /sprint`) pra aplicar o que foi combinado, marcando o
+item como `em_andamento`/`concluido` (`PATCH /sprint/:id/status`, aceita
+`notas_aplicacao` pra registrar o que foi feito/onde) ao longo do
+trabalho. Sem relação com nenhuma associação-cliente — mesmo padrão de
+RLS de `configuracoes_plataforma`/`solicitacoes_plano`: sem policy de
+tenant, todo acesso (`SELECT`/`INSERT`/`UPDATE`/`DELETE`) exige
+`app.superadmin_bypass`. Novo arquivo `routes/sprint.js`, usa
+`autenticarSuperAdmin`/`comConexaoSuperAdmin` (qualquer papel de
+super-admin, não só `super_admin` — é ferramenta interna, não algo
+sensível de dado de cliente). `tipo` (`melhoria`/`bug`), `prioridade`
+(`baixa`/`media`/`alta`/`urgente`), `status`
+(`pendente`/`em_andamento`/`concluido`/`cancelado`) são enums novos.
+
 ## Isolamento entre tenants (RLS) — já está ativo
 
 Não é só disciplina de código (`WHERE associacao_id = $1` em toda query,

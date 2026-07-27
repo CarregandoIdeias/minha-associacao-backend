@@ -22,6 +22,7 @@ const configuracoesRoutes = require('./routes/configuracoes');
 const superadminRoutes = require('./routes/superadmin');
 const atividadesRoutes = require('./routes/atividades');
 const planoRoutes = require('./routes/plano');
+const sprintRoutes = require('./routes/sprint');
 
 const app = express();
 
@@ -55,6 +56,7 @@ app.use('/configuracoes', configuracoesRoutes);
 app.use('/superadmin', superadminRoutes);
 app.use('/atividades', atividadesRoutes);
 app.use('/plano', planoRoutes);
+app.use('/sprint', sprintRoutes);
 
 app.get('/', (req, res) => {
     res.json({ status: 'ok', servico: 'plataforma-associacoes-api' });
