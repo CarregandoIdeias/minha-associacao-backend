@@ -66,6 +66,33 @@ si está detalhado em `supabase/README.md`):
    `bootstrap_secret` no corpo) — ver `routes/superadmin.js`.
 4. Ver `painel/CLAUDE.md` pra a parte do Vercel (front-end).
 
+**Incidente real (27/07/2026): staging nasceu sem as 5 policies de
+`tenant_isolation_*` de `associados`/`cobrancas`/`comunicados`/
+`pagamentos`/`usuarios`.** São o último bloco de `CREATE POLICY` do
+`baseline_schema.sql` (linhas finais do arquivo) — a colagem/execução no
+SQL Editor do Supabase parou antes de rodar esse bloco quando o staging
+foi criado, e ninguém notou porque as outras ~30 policies das migrations
+seguintes foram aplicadas normalmente. Sintoma: `INSERT`/`UPDATE` nessas
+tabelas falhava sempre (não intermitente) com `new row violates row-level
+security policy`, mesmo com o `associacao_id` certo — porque sem a policy
+de isolamento por tenant, só sobra a policy de bypass do super-admin
+(que não se aplica ao fluxo normal). Corrigido rodando os 5 `CREATE
+POLICY` que faltavam direto no SQL Editor de staging (aditivo, seguro).
+**Se recriar o staging do zero de novo: depois de colar
+`baseline_schema.sql`, confirmar com
+`SELECT tablename, policyname FROM pg_policies WHERE policyname LIKE
+'tenant_isolation%'` que as 8 esperadas (as 5 do baseline + associacoes/
+comunicado_leituras/password_resets das migrations seguintes) estão
+todas lá antes de considerar o schema completo.**
+
+**Cuidado extra manual ao rodar SQL de correção contra staging**: nessa
+mesma investigação, rodar o mesmo `CREATE POLICY` deu "already exists" —
+a causa não era o banco, era a aba do SQL Editor estar aberta no projeto
+de **produção** por engano (produção já tinha essa policy desde 24/07).
+Sempre conferir o nome do projeto no topo da página do Supabase antes de
+rodar qualquer DDL, especialmente com duas abas (staging/produção)
+abertas ao mesmo tempo.
+
 ## Regra mais importante deste repositório
 
 **Desde 27/07/2026 existe staging (ver seção acima) — mas se você estiver
