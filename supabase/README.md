@@ -58,11 +58,30 @@ produção está usando naquele momento.
 
 ## Grants do Supabase
 
-Tabelas novas herdam automaticamente `REVOKE` de `anon`/`authenticated`
-(configurado via `ALTER DEFAULT PRIVILEGES` na migration 5) e `GRANT` para
-`app_runtime` (configurado na criação da role). Ainda assim, **confira
-explicitamente** depois de criar uma tabela nova — não confie cegamente no
-default:
+**Achado real, confirmado montando o ambiente de staging do zero
+(27/07/2026): não confie no `ALTER DEFAULT PRIVILEGES` da migration 5 pra
+revogar `anon`/`authenticated` em tabelas novas.** Na teoria ele deveria
+cobrir qualquer tabela criada depois dele pela role `postgres`; na prática,
+rodando todas as migrations em sequência num projeto novo, as tabelas
+criadas nas migrations posteriores (`atividades`, `logs_auditoria`,
+`solicitacoes_plano`, `configuracoes_plataforma`, `sprint_itens`) saíram
+com `anon`/`authenticated` tendo acesso total mesmo assim — o Supabase
+parece reconceder acesso padrão em tabela nova por conta própria,
+independente desse `ALTER DEFAULT PRIVILEGES`. **Sempre rode o `REVOKE`
+abaixo de novo depois de criar qualquer tabela nova** (aditivo, seguro
+rodar quantas vezes quiser, mesmo se já não houver nada pra revogar):
+
+```sql
+REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM anon, authenticated;
+REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM anon, authenticated;
+REVOKE ALL PRIVILEGES ON SCHEMA public FROM anon, authenticated;
+```
+
+Tabelas novas herdam automaticamente `GRANT` para `app_runtime`
+(configurado via `ALTER DEFAULT PRIVILEGES` na criação da role — esse lado
+funcionou certo no teste de staging, só o de `anon`/`authenticated` que
+não). Ainda assim, **confira explicitamente** depois de criar uma tabela
+nova — não confie cegamente no default:
 
 ```sql
 SELECT grantee, string_agg(privilege_type, ',') 
