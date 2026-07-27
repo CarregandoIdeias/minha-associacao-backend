@@ -3,6 +3,11 @@ require('dotenv').config();
 const config = require('./config/env'); // valida/derruba o processo se faltar variável obrigatória em produção
 
 const express = require('express');
+// Faz exceção em handler async chegar no error handler do Express 4 (que
+// sozinho só pega erro síncrono). Sem isso, o handler no fim deste arquivo
+// nunca rodaria e a requisição ficaria pendurada -- ver comentário lá.
+// Precisa vir logo depois do require('express').
+require('express-async-errors');
 const cors = require('cors');
 const helmet = require('helmet');
 const { limiteGeral } = require('./middleware/rateLimiter');
@@ -53,6 +58,28 @@ app.use('/plano', planoRoutes);
 
 app.get('/', (req, res) => {
     res.json({ status: 'ok', servico: 'plataforma-associacoes-api' });
+});
+
+// Rede de segurança: no Express 4, uma exceção lançada dentro de um handler
+// async NÃO vira resposta de erro -- vira rejeição não tratada, e a requisição
+// fica pendurada até o navegador desistir (sintoma: "o sistema trava/está
+// instável", sem nenhum erro na tela). Isso acontecia de verdade quando o pool
+// entregava uma conexão já derrubada pelo Supabase, porque toda rota faz
+// `const client = await comConexaoX()` antes do try.
+//
+// A causa principal foi corrigida em middleware/auth.js (comConexaoComSessao
+// descarta a conexão morta e tenta outra). Este handler é o cinto de segurança
+// para qualquer outro caso: sempre devolve uma resposta.
+app.use((err, req, res, next) => {
+    console.error('Erro não tratado em', req.method, req.originalUrl, '->', err);
+    if (res.headersSent) return next(err);
+    res.status(500).json({ erro: 'Erro interno do servidor' });
+});
+
+// Rejeição fora do ciclo de requisição (ex.: falha em log assíncrono): registra
+// em vez de deixar o processo morrer silenciosamente.
+process.on('unhandledRejection', (err) => {
+    console.error('Rejeição não tratada fora de requisição:', err);
 });
 
 app.listen(config.port, () => {

@@ -113,6 +113,33 @@ function autorizar(...papeisPermitidos) {
     };
 }
 
+// Pega uma conexão do pool e roda nela o SET de sessão que liga o isolamento
+// (RLS). Se essa primeira query falhar, é quase sempre porque o pool entregou
+// uma conexão que o Supabase já tinha derrubado por ociosidade -- o cliente só
+// descobre que está morto ao usar. Nesse caso a conexão é destruída (para não
+// voltar quebrada ao pool) e a operação é repetida uma vez com uma conexão nova.
+//
+// Isso era a causa de instabilidade: como toda rota faz
+// `const client = await comConexaoX()` ANTES do try, um erro aqui virava
+// rejeição não tratada -- e o Express 4 não converte isso em resposta, então a
+// requisição ficava pendurada até o timeout do navegador, sem erro nenhum.
+// (A rede de segurança para qualquer outro caso está em server.js.)
+async function comConexaoComSessao(sqlSet, valores) {
+    for (let tentativa = 1; tentativa <= 2; tentativa++) {
+        const client = await pool.connect();
+        try {
+            await client.query(sqlSet, valores);
+            return client; // lembrar de chamar client.release() depois de usar
+        } catch (err) {
+            // destroy() em vez de release(): a conexão está suspeita, não pode
+            // voltar para o pool e derrubar a próxima requisição também.
+            client.release(err);
+            if (tentativa === 2) throw err;
+            console.error('conexao do pool veio inutilizavel, tentando outra:', err.message);
+        }
+    }
+}
+
 // Abre uma conexão dedicada do pool e ativa o isolamento por tenant (RLS).
 // Necessário porque "SET" é por conexão, não pode usar pool.query direto
 // quando o isolamento depende de estado de sessão.
@@ -120,9 +147,7 @@ async function comConexaoTenant(associacaoId) {
     if (!UUID_REGEX.test(associacaoId)) {
         throw new Error('associacaoId inválido');
     }
-    const client = await pool.connect();
-    await client.query(`SELECT set_config('app.current_associacao_id', $1, false)`, [associacaoId]);
-    return client; // lembrar de chamar client.release() depois de usar
+    return comConexaoComSessao(`SELECT set_config('app.current_associacao_id', $1, false)`, [associacaoId]);
 }
 
 // Verifica o token de SUPER-ADMIN (separado do login das associações) e
@@ -200,9 +225,7 @@ function autorizarSuperAdmin(...papeisPermitidos) {
 // dados de todas as associações. A flag só é setada aqui, nunca a partir de
 // input do usuário — é isso que torna o bypass seguro.
 async function comConexaoSuperAdmin() {
-    const client = await pool.connect();
-    await client.query(`SELECT set_config('app.superadmin_bypass', 'true', false)`);
-    return client; // lembrar de chamar client.release() depois de usar
+    return comConexaoComSessao(`SELECT set_config('app.superadmin_bypass', 'true', false)`);
 }
 
 // Abre uma conexão dedicada com bypass para os fluxos públicos de
@@ -212,9 +235,7 @@ async function comConexaoSuperAdmin() {
 // descobrindo). Mesmo princípio de segurança do comConexaoSuperAdmin: a
 // flag nunca vem de input do usuário, só é setada por este código.
 async function comConexaoAuth() {
-    const client = await pool.connect();
-    await client.query(`SELECT set_config('app.auth_bypass', 'true', false)`);
-    return client; // lembrar de chamar client.release() depois de usar
+    return comConexaoComSessao(`SELECT set_config('app.auth_bypass', 'true', false)`);
 }
 
 module.exports = {

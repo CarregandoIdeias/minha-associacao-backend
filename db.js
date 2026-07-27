@@ -26,6 +26,14 @@ const pool = new Pool({
     // horizontalmente no Render, então o limite do Session Pooler do
     // Supabase precisa ser conferido antes de aumentar o nº de instâncias.
     max: config.poolMax,
+    // Sem isso, pool.connect() espera para sempre quando o pool está cheio: a
+    // requisição fica pendurada sem erro nenhum (parece "o sistema travou").
+    // Com timeout, vira um erro claro, que agora o error handler de server.js
+    // converte em 500 -- ruim, mas diagnosticável e sem prender o navegador.
+    connectionTimeoutMillis: 10000,
+    // Corta query que trava (lock, rede ruim) em vez de segurar a conexão do
+    // pool indefinidamente, o que acabaria esgotando o pool inteiro.
+    statement_timeout: 20000,
 });
 
 // Sem esse listener, um cliente ocioso no pool que tenha a conexão encerrada
