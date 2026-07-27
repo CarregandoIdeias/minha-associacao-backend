@@ -703,18 +703,22 @@ router.post('/associacoes', async (req, res) => {
 
         // trial_expira_em só faz sentido pra quem nasce em trial -- planos
         // pagos criados direto (raro, mas possível) não têm expiração de trial.
+        // Calculado aqui em JS (não em SQL) porque reusar o mesmo parâmetro
+        // ($12) tanto pro INSERT quanto numa comparação de tipo diferente
+        // dentro da mesma query dá erro no Postgres ("inconsistent types
+        // deduced for parameter", 42P08 -- texto vs enum plano_assinatura).
         const planoFinal = plano || 'trial';
+        const trialExpiraEm = planoFinal === 'trial' ? new Date(Date.now() + diasTrial * 24 * 60 * 60 * 1000) : null;
         const associacao = await client.query(
             `INSERT INTO associacoes (nome, tipo, email, telefone, endereco, cidade, estado, cep, site, cnpj, logo_url,
                                        plano, valor_mensalidade_manual, vencimento_assinatura, forma_cobranca,
                                        trial_dias, trial_expira_em)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
-                     CASE WHEN $12 = 'trial' THEN now() + ($16 || ' days')::interval ELSE NULL END)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
              RETURNING id`,
             [nome_associacao, tipo || 'outra', email, telefone || null, endereco || null, cidade || null, estado || null,
                 cep || null, site || null, cnpj || null, logo_base64 || null,
                 planoFinal, valor_mensalidade_manual || null, vencimento_assinatura || null, forma_cobranca || null,
-                diasTrial]
+                diasTrial, trialExpiraEm]
         );
         const associacaoId = associacao.rows[0].id;
 
