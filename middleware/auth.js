@@ -154,7 +154,7 @@ async function autenticarSuperAdmin(req, res, next) {
 
     try {
         const resultado = await pool.query(
-            `SELECT nome, papel, ativo FROM super_admins WHERE id = $1`,
+            `SELECT nome, papel, ativo, deve_trocar_senha FROM super_admins WHERE id = $1`,
             [payload.id]
         );
         const admin = resultado.rows[0];
@@ -164,6 +164,19 @@ async function autenticarSuperAdmin(req, res, next) {
         // { id, email, tipo, papel, nome } -- papel/nome vêm frescos do banco,
         // não do token, para uma troca de nível de permissão valer na hora.
         req.superAdmin = { ...payload, papel: admin.papel, nome: admin.nome };
+
+        // Senha provisória pendente bloqueia tudo, menos a própria troca de
+        // senha -- equivalente ao bloquearSenhaProvisoria dos usuários comuns.
+        // Sem isso, a senha provisória (mostrada uma vez e repassada por fora,
+        // por WhatsApp/e-mail) valia pra sempre via chamada direta à API, já
+        // que só o front-end pedia a troca.
+        if (admin.deve_trocar_senha && !(req.method === 'PUT' && req.path === '/perfil/senha')) {
+            return res.status(403).json({
+                erro: 'Você precisa definir uma nova senha antes de continuar',
+                codigo: 'SENHA_PROVISORIA_PENDENTE',
+            });
+        }
+
         next();
     } catch (err) {
         console.error(err);

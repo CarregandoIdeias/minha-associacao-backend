@@ -2,6 +2,7 @@
 // Rotas exclusivas para o papel "associado" — cada um só vê os próprios dados.
 const express = require('express');
 const { autenticar, bloquearSenhaProvisoria, bloquearTrialExpirado, autorizar, comConexaoTenant } = require('../middleware/auth');
+const { imagemBase64Valida, comprovanteBase64Valido } = require('../utils/validacao');
 
 const router = express.Router();
 router.use(autenticar);
@@ -42,8 +43,9 @@ router.put('/minha-foto', async (req, res) => {
     if (foto_base64.length > 2_800_000) {
         return res.status(400).json({ erro: 'Imagem muito grande. Escolha uma foto menor.' });
     }
-    if (!foto_base64.startsWith('data:image/')) {
-        return res.status(400).json({ erro: 'Formato de imagem inválido' });
+    // Valida o data URL inteiro, não só o prefixo -- ver utils/validacao.js.
+    if (!imagemBase64Valida(foto_base64)) {
+        return res.status(400).json({ erro: 'Formato de imagem inválido. Envie PNG, JPG, GIF ou WEBP.' });
     }
 
     const client = await comConexaoTenant(req.usuario.associacao_id);
@@ -129,8 +131,9 @@ router.put('/minhas-cobrancas/:id/comprovante', async (req, res) => {
     if (comprovante_base64.length > 2_800_000) {
         return res.status(400).json({ erro: 'Arquivo muito grande. Escolha uma imagem menor.' });
     }
-    if (!comprovante_base64.startsWith('data:image/') && !comprovante_base64.startsWith('data:application/pdf')) {
-        return res.status(400).json({ erro: 'Envie uma imagem ou PDF do comprovante' });
+    // Valida o data URL inteiro, não só o prefixo -- ver utils/validacao.js.
+    if (!comprovanteBase64Valido(comprovante_base64)) {
+        return res.status(400).json({ erro: 'Envie uma imagem (PNG/JPG/GIF/WEBP) ou PDF válido do comprovante' });
     }
 
     const client = await comConexaoTenant(req.usuario.associacao_id);

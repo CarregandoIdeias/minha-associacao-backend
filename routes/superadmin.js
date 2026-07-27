@@ -7,7 +7,7 @@ const pool = require('../db');
 const config = require('../config/env');
 const { autenticarSuperAdmin, autorizarSuperAdmin, comConexaoSuperAdmin } = require('../middleware/auth');
 const { limiteLogin } = require('../middleware/rateLimiter');
-const { emailValido, gerarSenhaProvisoria, cpfValido, senhaForte } = require('../utils/validacao');
+const { emailValido, gerarSenhaProvisoria, cpfValido, senhaForte, imagemBase64Valida } = require('../utils/validacao');
 const { registrarEventoAuth } = require('../utils/authLog');
 const { registrarLogAuditoria } = require('../utils/auditoria');
 const { calcularValorMensalidade, statusAssinatura } = require('../utils/precos');
@@ -15,6 +15,22 @@ const { gerarExcelLogs, gerarPdfLogs } = require('../utils/exportarLogs');
 
 const FORMAS_COBRANCA_VALIDAS = ['pix', 'boleto', 'cartao', 'dinheiro', 'outro'];
 const PAPEIS_SUPERADMIN_VALIDOS = ['super_admin', 'administrador', 'suporte'];
+
+// Modelo de permissão dos níveis da plataforma (menor privilégio):
+//
+//   super_admin   -- tudo, inclusive o que é irreversível ou dá acesso à conta
+//                    de um cliente (excluir associação, gerenciar admins,
+//                    configurar o Pix de recebimento da plataforma).
+//   administrador -- operação do dia a dia: cadastra/edita associação, aprova
+//                    contratação, exporta relatório. NÃO exclui associação.
+//   suporte       -- diagnóstico: enxerga tudo (dashboard, associações, logs),
+//                    mas não altera nada nem baixa dados em massa.
+//
+// Antes disso, só /admins e /configuracoes-plataforma checavam o nível -- na
+// prática 'suporte' conseguia excluir uma associação inteira (com todos os
+// associados/cobranças/comunicados, em cascata) e redefinir a senha do admin
+// de qualquer cliente, recebendo a senha nova na resposta.
+const GESTAO = ['super_admin', 'administrador'];
 
 const router = express.Router();
 const JWT_SECRET = config.jwtSecret;
@@ -503,7 +519,7 @@ router.get('/associacoes/:id/cobrancas', async (req, res) => {
 // PATCH /superadmin/associacoes/:id/resetar-senha-admin — gera uma nova senha
 // provisória para o admin da associação (mesmo padrão das outras contas:
 // senha aleatória, exibida uma única vez, troca obrigatória no próximo login)
-router.patch('/associacoes/:id/resetar-senha-admin', async (req, res) => {
+router.patch('/associacoes/:id/resetar-senha-admin', autorizarSuperAdmin(...GESTAO), async (req, res) => {
     const { id } = req.params;
 
     const senhaProvisoria = gerarSenhaProvisoria();
@@ -668,7 +684,7 @@ router.get('/dashboard', async (req, res) => {
 // O e-mail principal da associação é o mesmo usado para o primeiro login do
 // admin — a senha é gerada automaticamente e devolvida uma única vez nesta
 // resposta (enquanto não há envio de e-mail integrado).
-router.post('/associacoes', async (req, res) => {
+router.post('/associacoes', autorizarSuperAdmin(...GESTAO), async (req, res) => {
     const {
         nome_associacao, tipo, email, telefone, endereco, cidade, estado, cep, site, cnpj, logo_base64,
         nome_admin, cpf,
@@ -690,6 +706,9 @@ router.post('/associacoes', async (req, res) => {
     const diasTrial = trial_dias ? parseInt(trial_dias, 10) : 15;
     if (isNaN(diasTrial) || diasTrial < 1 || diasTrial > 365) {
         return res.status(400).json({ erro: 'trial_dias deve ser um número entre 1 e 365' });
+    }
+    if (logo_base64 && !imagemBase64Valida(logo_base64)) {
+        return res.status(400).json({ erro: 'Logo inválida. Envie PNG, JPG, GIF ou WEBP.' });
     }
 
     // Gerado/hasheado antes de pegar a conexão -- ver comentário equivalente
@@ -765,7 +784,7 @@ router.post('/associacoes', async (req, res) => {
 
 // PUT /superadmin/associacoes/:id — edita os dados de uma associação
 // (associacoes agora tem RLS real -> precisa da conexão de bypass do super-admin)
-router.put('/associacoes/:id', async (req, res) => {
+router.put('/associacoes/:id', autorizarSuperAdmin(...GESTAO), async (req, res) => {
     const { id } = req.params;
     const {
         nome, tipo, email, telefone, endereco, cidade, estado, cep, site, cnpj, logo_base64, ativo,
@@ -783,6 +802,9 @@ router.put('/associacoes/:id', async (req, res) => {
     }
     if (trial_dias !== undefined && trial_dias !== null && (isNaN(parseInt(trial_dias, 10)) || trial_dias < 1 || trial_dias > 365)) {
         return res.status(400).json({ erro: 'trial_dias deve ser um número entre 1 e 365' });
+    }
+    if (logo_base64 && !imagemBase64Valida(logo_base64)) {
+        return res.status(400).json({ erro: 'Logo inválida. Envie PNG, JPG, GIF ou WEBP.' });
     }
 
     const client = await comConexaoSuperAdmin();
@@ -850,7 +872,7 @@ router.put('/associacoes/:id', async (req, res) => {
 // DELETE /superadmin/associacoes/:id — remove a associação e tudo que pertence a ela
 // O ON DELETE CASCADE toca associados/cobrancas/usuarios/comunicados/pagamentos
 // (todas com RLS) -> precisa da conexão de bypass do super-admin
-router.delete('/associacoes/:id', async (req, res) => {
+router.delete('/associacoes/:id', autorizarSuperAdmin('super_admin'), async (req, res) => {
     const { id } = req.params;
     const client = await comConexaoSuperAdmin();
     try {
@@ -967,7 +989,7 @@ router.get('/logs', async (req, res) => {
 // GET /superadmin/logs/exportar/:formato — respeita os mesmos filtros da
 // listagem, sem paginação (limitado a LIMITE_EXPORTACAO linhas), e registra a
 // própria exportação como uma linha de auditoria (tipo_acao 'exportacao').
-router.get('/logs/exportar/:formato', async (req, res) => {
+router.get('/logs/exportar/:formato', autorizarSuperAdmin(...GESTAO), async (req, res) => {
     const { formato } = req.params;
     if (!['excel', 'pdf'].includes(formato)) {
         return res.status(400).json({ erro: 'formato deve ser "excel" ou "pdf"' });
@@ -1071,7 +1093,7 @@ router.get('/solicitacoes-plano/:id/comprovante', async (req, res) => {
 // PATCH /superadmin/solicitacoes-plano/:id/aprovar — ativa o plano solicitado
 // na associação (vencimento padrão de 30 dias a partir de hoje, mesmo se já
 // tinha um vencimento anterior -- é uma contratação nova).
-router.patch('/solicitacoes-plano/:id/aprovar', async (req, res) => {
+router.patch('/solicitacoes-plano/:id/aprovar', autorizarSuperAdmin(...GESTAO), async (req, res) => {
     const { id } = req.params;
     const client = await comConexaoSuperAdmin();
     try {
@@ -1120,7 +1142,7 @@ router.patch('/solicitacoes-plano/:id/aprovar', async (req, res) => {
 });
 
 // PATCH /superadmin/solicitacoes-plano/:id/rejeitar
-router.patch('/solicitacoes-plano/:id/rejeitar', async (req, res) => {
+router.patch('/solicitacoes-plano/:id/rejeitar', autorizarSuperAdmin(...GESTAO), async (req, res) => {
     const { id } = req.params;
     const { motivo } = req.body;
     const client = await comConexaoSuperAdmin();

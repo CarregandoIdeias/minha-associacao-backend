@@ -8,6 +8,7 @@
 const express = require('express');
 const { autenticar, bloquearSenhaProvisoria, autorizar, comConexaoTenant } = require('../middleware/auth');
 const { registrarLogAuditoria } = require('../utils/auditoria');
+const { comprovanteBase64Valido } = require('../utils/validacao');
 const { calcularValorMensalidade, statusAssinatura } = require('../utils/precos');
 
 const router = express.Router();
@@ -86,8 +87,10 @@ router.post('/solicitar-contratacao', autorizar('admin'), async (req, res) => {
     if (comprovante_base64.length > 2_800_000) {
         return res.status(400).json({ erro: 'Arquivo muito grande. Escolha uma imagem menor.' });
     }
-    if (!comprovante_base64.startsWith('data:image/') && !comprovante_base64.startsWith('data:application/pdf')) {
-        return res.status(400).json({ erro: 'Envie uma imagem ou PDF do comprovante' });
+    // Valida o data URL inteiro, não só o prefixo -- ver comentário em
+    // utils/validacao.js (era vetor de XSS armazenado contra o Super Admin).
+    if (!comprovanteBase64Valido(comprovante_base64)) {
+        return res.status(400).json({ erro: 'Envie uma imagem (PNG/JPG/GIF/WEBP) ou PDF válido do comprovante' });
     }
 
     const client = await comConexaoTenant(req.usuario.associacao_id);

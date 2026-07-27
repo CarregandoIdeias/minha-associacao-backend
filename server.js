@@ -4,6 +4,7 @@ const config = require('./config/env'); // valida/derruba o processo se faltar v
 
 const express = require('express');
 const cors = require('cors');
+const helmet = require('helmet');
 const { limiteGeral } = require('./middleware/rateLimiter');
 
 const authRoutes = require('./routes/auth');
@@ -24,6 +25,12 @@ const app = express();
 // proxy pra todo mundo, e o limite de tentativas vira compartilhado entre
 // todos os clientes em vez de por-IP de verdade.
 app.set('trust proxy', 1);
+
+// Cabeçalhos de segurança. A CSP do helmet vem desligada de propósito: esta
+// API só devolve JSON (o front é servido pela Vercel, com CSP própria em
+// painel/vercel.json) e a CSP padrão do helmet só atrapalharia a resposta de
+// erro em HTML do Express sem agregar proteção real aqui.
+app.use(helmet({ contentSecurityPolicy: false }));
 
 app.use(cors({ origin: config.corsOrigins }));
 // Antes de express.json() de propósito -- rejeita rajadas antes de gastar
