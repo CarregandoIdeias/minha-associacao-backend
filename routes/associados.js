@@ -20,7 +20,9 @@ router.get('/', autorizar('admin', 'diretoria'), async (req, res) => {
     const client = await comConexaoTenant(req.usuario.associacao_id);
     try {
         const resultado = await client.query(
-            `SELECT id, nome_completo, cpf, telefone, categoria, status, data_ingresso, observacao
+            `SELECT id, nome_completo, cpf, telefone, categoria, status, data_ingresso, observacao, criado_em,
+                    rg, endereco_cep, endereco_logradouro, endereco_numero, endereco_complemento,
+                    endereco_bairro, endereco_cidade, endereco_estado
              FROM associados
              WHERE associacao_id = $1
              ORDER BY nome_completo`,
@@ -38,7 +40,11 @@ router.get('/', autorizar('admin', 'diretoria'), async (req, res) => {
 // POST /associados — cria um associado e já provisiona o login dele com uma
 // senha gerada automaticamente (só admin/diretoria)
 router.post('/', autorizar('admin', 'diretoria'), async (req, res) => {
-    const { nome_completo, cpf, telefone, categoria, observacao, email } = req.body;
+    const {
+        nome_completo, cpf, telefone, categoria, observacao, email, rg,
+        endereco_cep, endereco_logradouro, endereco_numero, endereco_complemento,
+        endereco_bairro, endereco_cidade, endereco_estado,
+    } = req.body;
 
     if (!nome_completo || !nome_completo.trim()) {
         return res.status(400).json({ erro: 'nome_completo é obrigatório' });
@@ -69,10 +75,16 @@ router.post('/', autorizar('admin', 'diretoria'), async (req, res) => {
         );
 
         const resultado = await client.query(
-            `INSERT INTO associados (associacao_id, usuario_id, nome_completo, cpf, telefone, categoria, observacao)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)
-             RETURNING id, nome_completo, cpf, telefone, categoria, status, data_ingresso, observacao`,
-            [req.usuario.associacao_id, usuario.rows[0].id, nome_completo.trim(), cpf || null, telefone || null, categoria || null, observacao || null]
+            `INSERT INTO associados (associacao_id, usuario_id, nome_completo, cpf, telefone, categoria, observacao,
+                                      rg, endereco_cep, endereco_logradouro, endereco_numero, endereco_complemento,
+                                      endereco_bairro, endereco_cidade, endereco_estado)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+             RETURNING id, nome_completo, cpf, telefone, categoria, status, data_ingresso, observacao, criado_em,
+                       rg, endereco_cep, endereco_logradouro, endereco_numero, endereco_complemento,
+                       endereco_bairro, endereco_cidade, endereco_estado`,
+            [req.usuario.associacao_id, usuario.rows[0].id, nome_completo.trim(), cpf || null, telefone || null, categoria || null, observacao || null,
+                rg || null, endereco_cep || null, endereco_logradouro || null, endereco_numero || null, endereco_complemento || null,
+                endereco_bairro || null, endereco_cidade || null, endereco_estado || null]
         );
 
         await registrarEventoAuth(client, {
@@ -120,7 +132,11 @@ router.post('/', autorizar('admin', 'diretoria'), async (req, res) => {
 // PUT /associados/:id — edita um associado existente (só admin/diretoria)
 router.put('/:id', autorizar('admin', 'diretoria'), async (req, res) => {
     const { id } = req.params;
-    const { nome_completo, cpf, telefone, categoria, status, observacao } = req.body;
+    const {
+        nome_completo, cpf, telefone, categoria, status, observacao, rg,
+        endereco_cep, endereco_logradouro, endereco_numero, endereco_complemento,
+        endereco_bairro, endereco_cidade, endereco_estado,
+    } = req.body;
 
     if (!nome_completo || !nome_completo.trim()) {
         return res.status(400).json({ erro: 'nome_completo é obrigatório' });
@@ -136,7 +152,10 @@ router.put('/:id', autorizar('admin', 'diretoria'), async (req, res) => {
     const client = await comConexaoTenant(req.usuario.associacao_id);
     try {
         const anterior = await client.query(
-            `SELECT id, nome_completo, cpf, telefone, categoria, status, observacao FROM associados WHERE id = $1 AND associacao_id = $2`,
+            `SELECT id, nome_completo, cpf, telefone, categoria, status, observacao,
+                    rg, endereco_cep, endereco_logradouro, endereco_numero, endereco_complemento,
+                    endereco_bairro, endereco_cidade, endereco_estado
+             FROM associados WHERE id = $1 AND associacao_id = $2`,
             [id, req.usuario.associacao_id]
         );
         if (anterior.rows.length === 0) {
@@ -146,10 +165,16 @@ router.put('/:id', autorizar('admin', 'diretoria'), async (req, res) => {
         const resultado = await client.query(
             `UPDATE associados
              SET nome_completo = $1, cpf = $2, telefone = $3, categoria = $4,
-                 status = COALESCE($5, status), observacao = $6
+                 status = COALESCE($5, status), observacao = $6,
+                 rg = $9, endereco_cep = $10, endereco_logradouro = $11, endereco_numero = $12,
+                 endereco_complemento = $13, endereco_bairro = $14, endereco_cidade = $15, endereco_estado = $16
              WHERE id = $7 AND associacao_id = $8
-             RETURNING id, nome_completo, cpf, telefone, categoria, status, data_ingresso, observacao`,
-            [nome_completo.trim(), cpf || null, telefone || null, categoria || null, status || null, observacao || null, id, req.usuario.associacao_id]
+             RETURNING id, nome_completo, cpf, telefone, categoria, status, data_ingresso, observacao, criado_em,
+                       rg, endereco_cep, endereco_logradouro, endereco_numero, endereco_complemento,
+                       endereco_bairro, endereco_cidade, endereco_estado`,
+            [nome_completo.trim(), cpf || null, telefone || null, categoria || null, status || null, observacao || null, id, req.usuario.associacao_id,
+                rg || null, endereco_cep || null, endereco_logradouro || null, endereco_numero || null,
+                endereco_complemento || null, endereco_bairro || null, endereco_cidade || null, endereco_estado || null]
         );
 
         await registrarAtividade(client, {
@@ -173,6 +198,44 @@ router.put('/:id', autorizar('admin', 'diretoria'), async (req, res) => {
         }
         console.error(err);
         res.status(500).json({ erro: 'Erro ao editar associado' });
+    } finally {
+        client.release();
+    }
+});
+
+// GET /associados/:id/comunicados — histórico de comunicados enviados a
+// esse associado específico, com status de leitura (item de sprint 2.3).
+// Mesma regra de visibilidade que o associado teria no portal dele (só
+// comunicados 'ativo' já publicados — ver routes/comunicados.js).
+router.get('/:id/comunicados', autorizar('admin', 'diretoria'), async (req, res) => {
+    const { id } = req.params;
+    const { lido } = req.query; // 'lidos' | 'nao_lidos' | ausente (todos)
+    const client = await comConexaoTenant(req.usuario.associacao_id);
+    try {
+        const associado = await client.query(
+            `SELECT usuario_id FROM associados WHERE id = $1 AND associacao_id = $2`,
+            [id, req.usuario.associacao_id]
+        );
+        if (associado.rows.length === 0) {
+            return res.status(404).json({ erro: 'Associado não encontrado' });
+        }
+
+        const condicoes = [`c.associacao_id = $1`, `c.status = 'ativo'`, `c.publicado_em <= now()`];
+        if (lido === 'lidos') condicoes.push(`cl.id IS NOT NULL`);
+        if (lido === 'nao_lidos') condicoes.push(`cl.id IS NULL`);
+
+        const resultado = await client.query(
+            `SELECT c.id, c.titulo, c.publicado_em, cl.criado_em AS lido_em, (cl.id IS NOT NULL) AS lido
+             FROM comunicados c
+             LEFT JOIN comunicado_leituras cl ON cl.comunicado_id = c.id AND cl.usuario_id = $2
+             WHERE ${condicoes.join(' AND ')}
+             ORDER BY c.publicado_em DESC`,
+            [req.usuario.associacao_id, associado.rows[0].usuario_id]
+        );
+        res.json(resultado.rows);
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ erro: 'Erro ao listar comunicados do associado' });
     } finally {
         client.release();
     }

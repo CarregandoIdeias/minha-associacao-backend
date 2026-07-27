@@ -452,6 +452,34 @@ sensível de dado de cliente). `tipo` (`melhoria`/`bug`), `prioridade`
 (`baixa`/`media`/`alta`/`urgente`), `status`
 (`pendente`/`em_andamento`/`concluido`/`cancelado`) são enums novos.
 
+## Ficha completa do associado + histórico financeiro/comunicados (itens de sprint 2.1-2.3, 27/07/2026)
+
+`associados` ganhou 8 colunas novas (migration `20260727150000_ficha_associado.sql`,
+aditiva): `rg` e endereço estruturado (`endereco_cep`, `endereco_logradouro`,
+`endereco_numero`, `endereco_complemento`, `endereco_bairro`,
+`endereco_cidade`, `endereco_estado`). Sem campo de veículo — descartado
+explicitamente pelo usuário. "Plano contratado" da ficha **não é campo
+novo**, é o `categoria` já existente, só relabelado na UI.
+
+`GET/POST/PUT /associados` (`routes/associados.js`) passaram a
+selecionar/aceitar essas colunas, além de `criado_em` (não vinha antes).
+
+**2.2 (histórico financeiro) não precisou de rota nova** — `GET
+/cobrancas?associado_id=X` já existia e já tinha tudo (valor, vencimento,
+`pago_em`, `metodo`, `status`/`status_exibicao`, `tem_comprovante`);
+`GET /cobrancas/:id/comprovante` também já existia. O filtro por
+período/ano é só client-side (`painel/index.html`), sem parâmetro novo na
+API.
+
+**2.3 (histórico de comunicados) ganhou rota nova**: `GET
+/associados/:id/comunicados` (admin/diretoria), aceita `?lido=lidos` ou
+`?lido=nao_lidos` (ausente = todos). Mesma regra de visibilidade que o
+associado teria no portal dele — só comunicados `status = 'ativo'` já
+`publicado_em <= now()` (ver `routes/comunicados.js`) — join com
+`comunicado_leituras` pelo `usuario_id` do associado (`associados.usuario_id`,
+pode ser `null` se a conta de login foi removida; nesse caso tudo aparece
+como não lido, comportamento aceitável).
+
 ## Alerta inteligente de renovação do plano (item de sprint 1.4, 27/07/2026)
 
 `associacoes` ganhou `dias_alerta_assinatura` (migration
