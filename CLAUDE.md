@@ -219,6 +219,23 @@ voltou a ser raro (mesmo comportamento de antes de 26/07).
 `console.error(err)` de `autenticar()`/error handler mostra a query e o
 código `22P02`) e considerar abrir chamado com o suporte do Supabase.
 
+**27/07/2026 (continuação) — voltou a acontecer em staging, retry reforçado
+em 3 pontos**: o mesmo sintoma apareceu várias vezes no ambiente de
+staging (não produção) no mesmo dia em que staging foi criado, inclusive
+sem eu estar rodando nenhum script pesado num dos casos — sugere que o
+projeto Supabase de staging pode ter um pooler com menos fôlego que o de
+produção (plano/tier menor, vale o usuário conferir no dashboard). Reforço
+aplicado enquanto isso (não resolve a causa raiz, reduz a chance do
+usuário ver o erro): `autenticar()`, `comConexaoComSessao()` (usada por
+`comConexaoTenant`/`SuperAdmin`/`Auth`) e `buscarUsuarioPorEmail()` (login)
+foram de 2 para **3 tentativas**, com uma espera curta e crescente entre
+elas (`150ms * tentativa`, função `aguardar()`) em vez de tentar de novo
+imediatamente na mesma janela ruim. `autenticarSuperAdmin()` **não tinha
+nenhum retry antes** (usava `pool.query()` direto, sem a proteção que as
+outras três já tinham) — ganhou o mesmo tratamento agora, é provavelmente
+a rota que mais aparecia pro usuário como "Erro ao validar sessão" sem
+chance de se recuperar sozinha.
+
 **Cuidado ao investigar**: testes de diagnóstico pesados (dezenas/centenas
 de conexões em sequência rápida) contra produção podem eles mesmos causar
 ou piorar a instabilidade. Preferir requisições sequenciais e espaçadas ao

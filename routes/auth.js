@@ -124,7 +124,8 @@ router.post('/login', limiteLogin, async (req, res) => {
 // (middleware/auth.js) para falhas transitórias de conexão intermitentes,
 // causa raiz ainda não confirmada.
 async function buscarUsuarioPorEmail(email) {
-    for (let tentativa = 1; tentativa <= 2; tentativa++) {
+    const MAX_TENTATIVAS = 3;
+    for (let tentativa = 1; tentativa <= MAX_TENTATIVAS; tentativa++) {
         const client = await comConexaoAuth();
         try {
             const resultado = await client.query(
@@ -137,8 +138,9 @@ async function buscarUsuarioPorEmail(email) {
             );
             return resultado.rows[0];
         } catch (err) {
-            if (tentativa === 2) throw err;
-            console.error('login: 1a tentativa falhou, tentando de novo com conexao nova:', err.message);
+            if (tentativa === MAX_TENTATIVAS) throw err;
+            console.error('login: tentativa ' + tentativa + ' falhou, tentando de novo com conexao nova:', err.message);
+            await new Promise((resolve) => setTimeout(resolve, 150 * tentativa));
         } finally {
             client.release();
         }

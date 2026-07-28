@@ -6,6 +6,14 @@ const config = require('../config/env');
 const JWT_SECRET = config.jwtSecret;
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+// Pequena espera entre tentativas de reconexão (ver comConexaoComSessao/
+// autenticar abaixo) -- dar um instante pro PgBouncer trocar de conexão
+// física antes de tentar de novo, em vez de bater imediatamente na mesma
+// conexão suspeita.
+function aguardar(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 // Verifica o token e disponibiliza os dados do usuário em req.usuario.
 // Também revalida contra o banco a cada requisição (usuário/associação
 // ainda ativos, papel em dia) — sem isso, desativar alguém ou bloquear a
@@ -33,13 +41,14 @@ async function autenticar(req, res, next) {
         return res.status(401).json({ erro: 'Token inválido ou expirado' });
     }
 
-    // Falhas transitórias de conexão (raras, ainda sem causa confirmada --
-    // suspeita de instabilidade pontual na rota Render -> pooler do Supabase)
-    // já foram vistas derrubando essa consulta com um erro estranho mesmo com
-    // um payload válido. Uma nova tentativa, com uma conexão nova do pool,
-    // resolve o caso comum sem esconder uma falha real (só desiste após a
-    // segunda tentativa).
-    for (let tentativa = 1; tentativa <= 2; tentativa++) {
+    // Falhas transitórias de conexão (instabilidade pontual do pooler do
+    // Supabase, ver CLAUDE.md) já foram vistas derrubando essa consulta com
+    // um erro estranho mesmo com um payload válido. 3 tentativas (era 2),
+    // com uma pequena espera crescente entre elas e uma conexão nova do pool
+    // a cada vez, resolve o caso comum sem esconder uma falha real (só
+    // desiste depois da terceira).
+    const MAX_TENTATIVAS = 3;
+    for (let tentativa = 1; tentativa <= MAX_TENTATIVAS; tentativa++) {
         const client = await comConexaoAuth();
         try {
             const resultado = await client.query(
@@ -64,11 +73,12 @@ async function autenticar(req, res, next) {
             req.usuario = { ...payload, papel: usuario.papel, nome: usuario.nome, plano: usuario.plano, trial_expira_em: usuario.trial_expira_em };
             return next();
         } catch (err) {
-            if (tentativa === 2) {
+            if (tentativa === MAX_TENTATIVAS) {
                 console.error(err);
                 return res.status(500).json({ erro: 'Erro ao validar sessão' });
             }
-            console.error('autenticar: 1a tentativa falhou, tentando de novo com conexao nova:', err.message);
+            console.error('autenticar: tentativa ' + tentativa + ' falhou, tentando de novo com conexao nova:', err.message);
+            await aguardar(150 * tentativa);
         } finally {
             client.release();
         }
@@ -125,7 +135,8 @@ function autorizar(...papeisPermitidos) {
 // requisição ficava pendurada até o timeout do navegador, sem erro nenhum.
 // (A rede de segurança para qualquer outro caso está em server.js.)
 async function comConexaoComSessao(sqlSet, valores) {
-    for (let tentativa = 1; tentativa <= 2; tentativa++) {
+    const MAX_TENTATIVAS = 3;
+    for (let tentativa = 1; tentativa <= MAX_TENTATIVAS; tentativa++) {
         const client = await pool.connect();
         try {
             await client.query(sqlSet, valores);
@@ -134,8 +145,9 @@ async function comConexaoComSessao(sqlSet, valores) {
             // destroy() em vez de release(): a conexão está suspeita, não pode
             // voltar para o pool e derrubar a próxima requisição também.
             client.release(err);
-            if (tentativa === 2) throw err;
-            console.error('conexao do pool veio inutilizavel, tentando outra:', err.message);
+            if (tentativa === MAX_TENTATIVAS) throw err;
+            console.error('conexao do pool veio inutilizavel, tentando outra (tentativa ' + tentativa + '):', err.message);
+            await aguardar(150 * tentativa);
         }
     }
 }
@@ -177,35 +189,45 @@ async function autenticarSuperAdmin(req, res, next) {
         return res.status(401).json({ erro: 'Token inválido ou expirado' });
     }
 
-    try {
-        const resultado = await pool.query(
-            `SELECT nome, papel, ativo, deve_trocar_senha FROM super_admins WHERE id = $1`,
-            [payload.id]
-        );
-        const admin = resultado.rows[0];
-        if (!admin || !admin.ativo) {
-            return res.status(401).json({ erro: 'Token inválido ou expirado' });
-        }
-        // { id, email, tipo, papel, nome } -- papel/nome vêm frescos do banco,
-        // não do token, para uma troca de nível de permissão valer na hora.
-        req.superAdmin = { ...payload, papel: admin.papel, nome: admin.nome };
+    // Mesma instabilidade transitória do pooler documentada em autenticar()
+    // acima -- esta rota não tinha retry nenhum antes, apesar de mostrar a
+    // mesma mensagem "Erro ao validar sessão" quando falhava.
+    const MAX_TENTATIVAS = 3;
+    for (let tentativa = 1; tentativa <= MAX_TENTATIVAS; tentativa++) {
+        try {
+            const resultado = await pool.query(
+                `SELECT nome, papel, ativo, deve_trocar_senha FROM super_admins WHERE id = $1`,
+                [payload.id]
+            );
+            const admin = resultado.rows[0];
+            if (!admin || !admin.ativo) {
+                return res.status(401).json({ erro: 'Token inválido ou expirado' });
+            }
+            // { id, email, tipo, papel, nome } -- papel/nome vêm frescos do banco,
+            // não do token, para uma troca de nível de permissão valer na hora.
+            req.superAdmin = { ...payload, papel: admin.papel, nome: admin.nome };
 
-        // Senha provisória pendente bloqueia tudo, menos a própria troca de
-        // senha -- equivalente ao bloquearSenhaProvisoria dos usuários comuns.
-        // Sem isso, a senha provisória (mostrada uma vez e repassada por fora,
-        // por WhatsApp/e-mail) valia pra sempre via chamada direta à API, já
-        // que só o front-end pedia a troca.
-        if (admin.deve_trocar_senha && !(req.method === 'PUT' && req.path === '/perfil/senha')) {
-            return res.status(403).json({
-                erro: 'Você precisa definir uma nova senha antes de continuar',
-                codigo: 'SENHA_PROVISORIA_PENDENTE',
-            });
-        }
+            // Senha provisória pendente bloqueia tudo, menos a própria troca de
+            // senha -- equivalente ao bloquearSenhaProvisoria dos usuários comuns.
+            // Sem isso, a senha provisória (mostrada uma vez e repassada por fora,
+            // por WhatsApp/e-mail) valia pra sempre via chamada direta à API, já
+            // que só o front-end pedia a troca.
+            if (admin.deve_trocar_senha && !(req.method === 'PUT' && req.path === '/perfil/senha')) {
+                return res.status(403).json({
+                    erro: 'Você precisa definir uma nova senha antes de continuar',
+                    codigo: 'SENHA_PROVISORIA_PENDENTE',
+                });
+            }
 
-        next();
-    } catch (err) {
-        console.error(err);
-        return res.status(500).json({ erro: 'Erro ao validar sessão' });
+            return next();
+        } catch (err) {
+            if (tentativa === MAX_TENTATIVAS) {
+                console.error(err);
+                return res.status(500).json({ erro: 'Erro ao validar sessão' });
+            }
+            console.error('autenticarSuperAdmin: tentativa ' + tentativa + ' falhou, tentando de novo:', err.message);
+            await aguardar(150 * tentativa);
+        }
     }
 }
 
