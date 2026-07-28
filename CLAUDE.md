@@ -469,6 +469,38 @@ sensível de dado de cliente). `tipo` (`melhoria`/`bug`), `prioridade`
 (`baixa`/`media`/`alta`/`urgente`), `status`
 (`pendente`/`em_andamento`/`concluido`/`cancelado`) são enums novos.
 
+## Reestruturação da sidebar — "Acessos e Usuários" (item de sprint 4, etapa 1, 27/07/2026)
+
+Primeira etapa (só a de "Acessos e Usuários") do pedido maior de unificar
+Usuários + Configurações num só menu "Configurações" com submenus — as
+demais seções de Parametrização (Financeiro/Alertas/Comunicação/
+Associados/Sistema/Segurança/Integrações) ficam pra sprints futuras, a
+pedido do usuário, um item por vez.
+
+`routes/usuarios.js`:
+- `GET /` ganhou `ultimo_acesso` (subquery `MAX(auth_logs.criado_em) WHERE
+  evento = 'login_sucesso'` por usuário — não precisou de coluna nova,
+  `auth_logs` já registrava isso desde sempre, só nunca tinha sido
+  exposto). `criado_em` já vinha, agora é usado no front também.
+- `PATCH /:id/reativar` (novo) — inverso de `/:id/desativar`, que já
+  existia; antes não tinha como reverter uma desativação pela UI.
+- `PATCH /:id/redefinir-senha` (novo) — gera senha provisória nova
+  (`deve_trocar_senha = true`), mesmo padrão de "credenciais geradas" já
+  usado em toda a plataforma. **`POST /:id/gerar-link-redefinicao` (rota
+  antiga, token + e-mail) nunca teve consumidor no front-end** — descoberto
+  ao procurar onde ficava "alterar senha" na tela de Usuários e não achar
+  nada; ficou órfã desde que foi criada. Não removida (pode ter uso futuro
+  com envio de e-mail de verdade), só documentada aqui pra não confundir.
+
+**Não implementado nessa etapa, de propósito** — "Perfil de acesso"
+(Administrador/Financeiro/Atendimento/Operador/Somente Consulta) e RBAC
+granular: o pedido original já dizia "quando implementado"/"estrutura
+preparada", ou seja, é reconhecidamente trabalho futuro. Adicionar esses
+papéis exigiria alterar o enum `papel` no banco e revisar toda chamada
+`autorizar(...)` do projeto — perigoso demais pra entrar de brinde numa
+etapa que era só reorganização de navegação. Fica registrado aqui como
+pendência conhecida pra quando o usuário pedir essa etapa especificamente.
+
 ## Confirmação de leitura dos comunicados (item de sprint 3, 27/07/2026)
 
 `GET /comunicados` ganhou `total_destinatarios` (contagem de `usuarios`

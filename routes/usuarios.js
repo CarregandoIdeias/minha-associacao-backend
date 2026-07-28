@@ -18,10 +18,12 @@ router.get('/', autorizar('admin'), async (req, res) => {
     const client = await comConexaoTenant(req.usuario.associacao_id);
     try {
         const resultado = await client.query(
-            `SELECT id, nome, email, papel, ativo, criado_em
-             FROM usuarios
-             WHERE associacao_id = $1
-             ORDER BY criado_em`,
+            `SELECT u.id, u.nome, u.email, u.papel, u.ativo, u.criado_em,
+                    (SELECT MAX(l.criado_em) FROM auth_logs l
+                      WHERE l.usuario_id = u.id AND l.evento = 'login_sucesso') AS ultimo_acesso
+             FROM usuarios u
+             WHERE u.associacao_id = $1
+             ORDER BY u.criado_em`,
             [req.usuario.associacao_id]
         );
         res.json(resultado.rows);
@@ -216,6 +218,71 @@ router.patch('/:id/desativar', autorizar('admin'), async (req, res) => {
     } catch (err) {
         console.error(err);
         res.status(500).json({ erro: 'Erro ao desativar usuário' });
+    } finally {
+        client.release();
+    }
+});
+
+// PATCH /usuarios/:id/reativar — reativa um usuário desativado (só admin)
+router.patch('/:id/reativar', autorizar('admin'), async (req, res) => {
+    const { id } = req.params;
+    const client = await comConexaoTenant(req.usuario.associacao_id);
+    try {
+        const resultado = await client.query(
+            `UPDATE usuarios SET ativo = true WHERE id = $1 AND associacao_id = $2 RETURNING id, nome`,
+            [id, req.usuario.associacao_id]
+        );
+        if (resultado.rows.length === 0) {
+            return res.status(404).json({ erro: 'Usuário não encontrado' });
+        }
+        await registrarLogAuditoria(client, {
+            associacaoId: req.usuario.associacao_id, usuarioId: req.usuario.id, usuarioNome: req.usuario.nome, usuarioEmail: req.usuario.email,
+            modulo: 'usuarios', tipoAcao: 'edicao',
+            descricao: req.usuario.nome + ' reativou o usuário ' + resultado.rows[0].nome,
+            dadosAnteriores: { ativo: false }, dadosNovos: { ativo: true }, req,
+        });
+        res.json({ ok: true });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ erro: 'Erro ao reativar usuário' });
+    } finally {
+        client.release();
+    }
+});
+
+// PATCH /usuarios/:id/redefinir-senha — admin gera uma senha provisória nova
+// pra outro usuário da associação (mesmo padrão de "credenciais geradas" já
+// usado em POST /associados e PATCH .../resetar-senha-admin do superadmin --
+// mais direto que o link por e-mail de POST /:id/gerar-link-redefinicao, que
+// não tem consumidor no front hoje).
+router.patch('/:id/redefinir-senha', autorizar('admin'), async (req, res) => {
+    const { id } = req.params;
+
+    // Gerado/hasheado fora da conexão do pool -- ver comentário equivalente
+    // em routes/associados.js (POST /).
+    const senhaProvisoria = gerarSenhaProvisoria();
+    const senhaHash = await bcrypt.hash(senhaProvisoria, 10);
+
+    const client = await comConexaoTenant(req.usuario.associacao_id);
+    try {
+        const resultado = await client.query(
+            `UPDATE usuarios SET senha_hash = $1, deve_trocar_senha = true
+             WHERE id = $2 AND associacao_id = $3 RETURNING id, nome, email`,
+            [senhaHash, id, req.usuario.associacao_id]
+        );
+        if (resultado.rows.length === 0) {
+            return res.status(404).json({ erro: 'Usuário não encontrado' });
+        }
+        await registrarLogAuditoria(client, {
+            associacaoId: req.usuario.associacao_id, usuarioId: req.usuario.id, usuarioNome: req.usuario.nome, usuarioEmail: req.usuario.email,
+            modulo: 'usuarios', tipoAcao: 'alteracao_senha',
+            descricao: req.usuario.nome + ' gerou uma senha provisória nova para ' + resultado.rows[0].nome,
+            req,
+        });
+        res.json({ ...resultado.rows[0], senha_provisoria: senhaProvisoria });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ erro: 'Erro ao redefinir senha' });
     } finally {
         client.release();
     }
