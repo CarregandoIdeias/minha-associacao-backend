@@ -2,6 +2,7 @@
 const express = require('express');
 const { autenticar, bloquearSenhaProvisoria, bloquearTrialExpirado, autorizar, comConexaoTenant } = require('../middleware/auth');
 const { registrarLogAuditoria } = require('../utils/auditoria');
+const { imagemBase64Valida } = require('../utils/validacao');
 
 const router = express.Router();
 router.use(autenticar);
@@ -78,6 +79,43 @@ router.get('/identidade', async (req, res) => {
     } catch (err) {
         console.error(err);
         res.status(500).json({ erro: 'Erro ao buscar identidade da associação' });
+    } finally {
+        client.release();
+    }
+});
+
+// PUT /configuracoes/logo — só admin troca a logo da própria associação
+router.put('/logo', autorizar('admin'), async (req, res) => {
+    const { logo_base64 } = req.body;
+
+    if (!logo_base64) {
+        return res.status(400).json({ erro: 'logo_base64 é obrigatório' });
+    }
+    // Limite de ~2MB em base64, mesmo padrão de /portal/minha-foto
+    if (logo_base64.length > 2_800_000) {
+        return res.status(400).json({ erro: 'Imagem muito grande. Escolha uma logo menor.' });
+    }
+    // Valida o data URL inteiro, não só o prefixo -- ver utils/validacao.js.
+    if (!imagemBase64Valida(logo_base64)) {
+        return res.status(400).json({ erro: 'Formato de imagem inválido. Envie PNG, JPG, GIF ou WEBP.' });
+    }
+
+    const client = await comConexaoTenant(req.usuario.associacao_id);
+    try {
+        await client.query(
+            `UPDATE associacoes SET logo_url = $1 WHERE id = $2`,
+            [logo_base64, req.usuario.associacao_id]
+        );
+        await registrarLogAuditoria(client, {
+            associacaoId: req.usuario.associacao_id, usuarioId: req.usuario.id, usuarioNome: req.usuario.nome, usuarioEmail: req.usuario.email,
+            modulo: 'configuracoes', tipoAcao: 'edicao',
+            descricao: req.usuario.nome + ' atualizou a logo da associação',
+            dadosAnteriores: null, dadosNovos: null, req,
+        });
+        res.json({ ok: true });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ erro: 'Erro ao salvar a logo' });
     } finally {
         client.release();
     }
