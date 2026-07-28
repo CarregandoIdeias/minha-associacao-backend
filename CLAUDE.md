@@ -469,6 +469,35 @@ sensível de dado de cliente). `tipo` (`melhoria`/`bug`), `prioridade`
 (`baixa`/`media`/`alta`/`urgente`), `status`
 (`pendente`/`em_andamento`/`concluido`/`cancelado`) são enums novos.
 
+## Auditoria por associação + navegação final de Acessos/Parametrização (item de sprint 4, etapa 2, 27/07/2026)
+
+Ajuste pedido depois da etapa 1: a estrutura final não é "Configurações"
+com sub-abas Usuários+Parametrização — é **"Acessos"** na sidebar
+(Usuários + Auditoria) e **"Parametrização"** só alcançável pelo
+"Preferências" do header, sem item próprio na sidebar. Ver
+`painel/CLAUDE.md` pra como isso ficou na navegação.
+
+Rota nova `routes/auditoria.js` (montada em `/auditoria`, `server.js`),
+espelhando `GET /superadmin/logs` só que já escopado por tenant — **não
+precisou de política de RLS nova**: `logs_auditoria_select_tenant` (`WHERE
+associacao_id = current_setting('app.current_associacao_id')::uuid`) já
+existia desde a Fase 2 do Super Admin (`20260726110000_logs_auditoria.sql`),
+só nunca tinha ganhado uma rota própria pro admin/diretoria de uma
+associação consultar os próprios logs — todas as rotas que já chamam
+`registrarLogAuditoria()` (associados/cobrancas/comunicados/usuarios/
+configuracoes/auth/plano) já estavam alimentando essa tabela desde 26/07,
+os dados já existiam, só não tinham como ser vistos por quem não fosse
+Super Admin.
+
+`GET /auditoria` e `GET /auditoria/exportar/:formato` reaproveitam
+`construirFiltros`/paginação no mesmo formato de `superadmin.js`, mas sem
+os campos que não fazem sentido num tenant único (`associacao`,
+`administradores` como módulo). Export reaproveita `gerarExcelLogs`/
+`gerarPdfLogs` de `utils/exportarLogs.js` **sem nenhuma mudança** — as
+colunas genéricas (usuário/associação/módulo/ação/descrição/ip) já
+funcionam aqui, `associacao_nome` só fica vazio (`—`) porque a query
+tenant não faz join com `associacoes`, inofensivo.
+
 ## Reestruturação da sidebar — "Acessos e Usuários" (item de sprint 4, etapa 1, 27/07/2026)
 
 Primeira etapa (só a de "Acessos e Usuários") do pedido maior de unificar

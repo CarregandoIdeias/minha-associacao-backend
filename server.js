@@ -23,6 +23,7 @@ const superadminRoutes = require('./routes/superadmin');
 const atividadesRoutes = require('./routes/atividades');
 const planoRoutes = require('./routes/plano');
 const sprintRoutes = require('./routes/sprint');
+const auditoriaRoutes = require('./routes/auditoria');
 
 const app = express();
 
@@ -57,6 +58,7 @@ app.use('/superadmin', superadminRoutes);
 app.use('/atividades', atividadesRoutes);
 app.use('/plano', planoRoutes);
 app.use('/sprint', sprintRoutes);
+app.use('/auditoria', auditoriaRoutes);
 
 app.get('/', (req, res) => {
     res.json({ status: 'ok', servico: 'plataforma-associacoes-api' });
