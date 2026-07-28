@@ -469,6 +469,36 @@ sensível de dado de cliente). `tipo` (`melhoria`/`bug`), `prioridade`
 (`baixa`/`media`/`alta`/`urgente`), `status`
 (`pendente`/`em_andamento`/`concluido`/`cancelado`) são enums novos.
 
+## Confirmação de leitura dos comunicados (item de sprint 3, 27/07/2026)
+
+`GET /comunicados` ganhou `total_destinatarios` (contagem de `usuarios`
+`papel='associado'` `ativo` da associação — mesmo critério usado nas
+rotas novas abaixo). `categoria_alvo` continua sendo só rótulo informativo
+(não filtra quem recebe, ver comentário já existente na rota) — por isso
+o universo de destinatários é "todo associado ativo com login", não
+filtrado por categoria.
+
+Duas rotas novas em `routes/comunicados.js` (admin/diretoria):
+- `GET /comunicados/:id/leituras` — devolve `{ titulo, leituras: [...] }`,
+  uma linha por `usuario` `papel='associado'` `ativo` da associação
+  (`LEFT JOIN comunicado_leituras`), com `lido`/`lido_em`. Como
+  `comunicado_leituras` tem `UNIQUE(comunicado_id, usuario_id)`,
+  `criado_em` já É a primeira (e única) leitura — não precisou de coluna
+  nova pra "primeira visualização". Sem paginação (mesma lógica de
+  `GET /cobrancas?associado_id=X`, filtro fica no front) — se uma
+  associação muito grande (milhares de associados) sentir lentidão aqui,
+  vale paginar depois.
+- `GET /comunicados/:id/leituras/exportar/:formato` (`excel`|`pdf`) —
+  `utils/exportarLeiturasComunicado.js` (novo, mesmo padrão de
+  `utils/exportarLogs.js`: `exceljs`/`pdfkit`, PDF desenhado manualmente).
+  Registra a própria exportação como linha de auditoria (`tipo_acao:
+  'exportacao'`), mesmo padrão de `GET /superadmin/logs/exportar/:formato`.
+
+**Não implementado, era "opcional" no pedido**: dispositivo usado na
+leitura — `comunicado_leituras` não tem coluna pra isso, exigiria
+capturar `User-Agent` em `POST /comunicados/:id/marcar-lido` e uma
+migration nova. Fica pra quando/se for pedido de verdade.
+
 ## Ficha completa do associado + histórico financeiro/comunicados (itens de sprint 2.1-2.3, 27/07/2026)
 
 `associados` ganhou 8 colunas novas (migration `20260727150000_ficha_associado.sql`,

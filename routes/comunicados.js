@@ -3,6 +3,7 @@ const express = require('express');
 const { autenticar, bloquearSenhaProvisoria, bloquearTrialExpirado, autorizar, comConexaoTenant } = require('../middleware/auth');
 const { registrarAtividade } = require('../utils/atividadeLog');
 const { registrarLogAuditoria } = require('../utils/auditoria');
+const { gerarExcelLeituras, gerarPdfLeituras } = require('../utils/exportarLeiturasComunicado');
 
 const router = express.Router();
 router.use(autenticar);
@@ -50,7 +51,9 @@ router.get('/', async (req, res) => {
                     (SELECT COUNT(DISTINCT cl2.usuario_id)
                        FROM comunicado_leituras cl2
                        JOIN usuarios u2 ON u2.id = cl2.usuario_id
-                      WHERE cl2.comunicado_id = c.id AND u2.papel = 'associado') AS leituras_associados
+                      WHERE cl2.comunicado_id = c.id AND u2.papel = 'associado') AS leituras_associados,
+                    (SELECT COUNT(*) FROM usuarios u3
+                      WHERE u3.associacao_id = c.associacao_id AND u3.papel = 'associado' AND u3.ativo) AS total_destinatarios
              FROM comunicados c
              LEFT JOIN usuarios u ON u.id = c.autor_id
              LEFT JOIN comunicado_leituras cl ON cl.comunicado_id = c.id AND cl.usuario_id = $${idxUsuario}
@@ -171,6 +174,95 @@ router.delete('/:id', autorizar('admin', 'diretoria'), async (req, res) => {
     } catch (err) {
         console.error(err);
         res.status(500).json({ erro: 'Erro ao remover comunicado' });
+    } finally {
+        client.release();
+    }
+});
+
+// GET /comunicados/:id/leituras — quem já leu/ainda não leu esse comunicado
+// (item de sprint 3, "Confirmação de Leitura"), só admin/diretoria.
+// Universo de destinatários = usuarios papel 'associado' ativos da
+// associação (mesmo critério do total_destinatarios em GET /comunicados) --
+// categoria_alvo é só rótulo informativo, não filtra quem recebe (ver
+// GET / acima, sem WHERE por categoria).
+router.get('/:id/leituras', autorizar('admin', 'diretoria'), async (req, res) => {
+    const { id } = req.params;
+    const client = await comConexaoTenant(req.usuario.associacao_id);
+    try {
+        const comunicado = await client.query(
+            `SELECT id, titulo FROM comunicados WHERE id = $1 AND associacao_id = $2`,
+            [id, req.usuario.associacao_id]
+        );
+        if (comunicado.rows.length === 0) {
+            return res.status(404).json({ erro: 'Comunicado não encontrado' });
+        }
+
+        const resultado = await client.query(
+            `SELECT u.id AS usuario_id, u.nome, u.email, (cl.id IS NOT NULL) AS lido, cl.criado_em AS lido_em
+             FROM usuarios u
+             LEFT JOIN comunicado_leituras cl ON cl.comunicado_id = $1 AND cl.usuario_id = u.id
+             WHERE u.associacao_id = $2 AND u.papel = 'associado' AND u.ativo
+             ORDER BY (cl.id IS NOT NULL) DESC, cl.criado_em ASC, u.nome`,
+            [id, req.usuario.associacao_id]
+        );
+        res.json({ titulo: comunicado.rows[0].titulo, leituras: resultado.rows });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ erro: 'Erro ao listar leituras do comunicado' });
+    } finally {
+        client.release();
+    }
+});
+
+// GET /comunicados/:id/leituras/exportar/:formato — mesma lista acima, em
+// Excel/PDF; registra a exportação como linha de auditoria (mesmo padrão
+// de GET /superadmin/logs/exportar/:formato).
+router.get('/:id/leituras/exportar/:formato', autorizar('admin', 'diretoria'), async (req, res) => {
+    const { id, formato } = req.params;
+    if (!['excel', 'pdf'].includes(formato)) {
+        return res.status(400).json({ erro: 'formato deve ser "excel" ou "pdf"' });
+    }
+
+    const client = await comConexaoTenant(req.usuario.associacao_id);
+    try {
+        const comunicado = await client.query(
+            `SELECT id, titulo FROM comunicados WHERE id = $1 AND associacao_id = $2`,
+            [id, req.usuario.associacao_id]
+        );
+        if (comunicado.rows.length === 0) {
+            return res.status(404).json({ erro: 'Comunicado não encontrado' });
+        }
+
+        const resultado = await client.query(
+            `SELECT u.nome, u.email, (cl.id IS NOT NULL) AS lido, cl.criado_em AS lido_em
+             FROM usuarios u
+             LEFT JOIN comunicado_leituras cl ON cl.comunicado_id = $1 AND cl.usuario_id = u.id
+             WHERE u.associacao_id = $2 AND u.papel = 'associado' AND u.ativo
+             ORDER BY (cl.id IS NOT NULL) DESC, cl.criado_em ASC, u.nome`,
+            [id, req.usuario.associacao_id]
+        );
+
+        await registrarLogAuditoria(client, {
+            associacaoId: req.usuario.associacao_id, usuarioId: req.usuario.id, usuarioNome: req.usuario.nome, usuarioEmail: req.usuario.email,
+            modulo: 'comunicados', tipoAcao: 'exportacao',
+            descricao: req.usuario.nome + ' exportou a lista de leituras do comunicado "' + comunicado.rows[0].titulo + '" em ' + formato.toUpperCase(),
+            req,
+        });
+
+        if (formato === 'excel') {
+            const buffer = await gerarExcelLeituras(comunicado.rows[0].titulo, resultado.rows);
+            res.set('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+            res.set('Content-Disposition', 'attachment; filename="leituras-comunicado.xlsx"');
+            return res.send(Buffer.from(buffer));
+        }
+
+        const buffer = await gerarPdfLeituras(comunicado.rows[0].titulo, resultado.rows);
+        res.set('Content-Type', 'application/pdf');
+        res.set('Content-Disposition', 'attachment; filename="leituras-comunicado.pdf"');
+        res.send(buffer);
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ erro: 'Erro ao exportar leituras do comunicado' });
     } finally {
         client.release();
     }
