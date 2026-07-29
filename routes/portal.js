@@ -15,7 +15,9 @@ router.get('/meus-dados', async (req, res) => {
     const client = await comConexaoTenant(req.usuario.associacao_id);
     try {
         const resultado = await client.query(
-            `SELECT id, nome_completo, cpf, telefone, categoria, status, data_ingresso, foto_base64
+            `SELECT id, nome_completo, cpf, rg, telefone, categoria, status, data_ingresso, criado_em, foto_base64,
+                    endereco_cep, endereco_logradouro, endereco_numero, endereco_complemento,
+                    endereco_bairro, endereco_cidade, endereco_estado
              FROM associados
              WHERE usuario_id = $1`,
             [req.usuario.id]
