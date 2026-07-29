@@ -18,7 +18,7 @@ router.get('/', async (req, res) => {
     const { busca, status } = req.query;
     const client = await comConexaoTenant(req.usuario.associacao_id);
     try {
-        const ehGestor = req.usuario.papel === 'admin' || req.usuario.papel === 'diretoria';
+        const ehGestor = ['admin', 'diretoria', 'financeiro', 'atendimento', 'operador', 'consulta'].includes(req.usuario.papel);
         const condicoes = [];
         const valores = [];
 
@@ -71,7 +71,7 @@ router.get('/', async (req, res) => {
 });
 
 // POST /comunicados — cria um novo comunicado (só admin/diretoria)
-router.post('/', autorizar('admin', 'diretoria'), async (req, res) => {
+router.post('/', autorizar('admin', 'diretoria', 'atendimento', 'operador'), async (req, res) => {
     const { titulo, conteudo, categoria_alvo, destaque, publicado_em, status } = req.body;
 
     if (!titulo || !conteudo) {
@@ -111,7 +111,7 @@ router.post('/', autorizar('admin', 'diretoria'), async (req, res) => {
 });
 
 // PUT /comunicados/:id — edita um comunicado (só admin/diretoria)
-router.put('/:id', autorizar('admin', 'diretoria'), async (req, res) => {
+router.put('/:id', autorizar('admin', 'diretoria', 'atendimento', 'operador'), async (req, res) => {
     const { id } = req.params;
     const { titulo, conteudo, categoria_alvo, destaque, publicado_em, status } = req.body;
 
@@ -158,7 +158,7 @@ router.put('/:id', autorizar('admin', 'diretoria'), async (req, res) => {
 });
 
 // DELETE /comunicados/:id — remove um comunicado (só admin/diretoria)
-router.delete('/:id', autorizar('admin', 'diretoria'), async (req, res) => {
+router.delete('/:id', autorizar('admin', 'diretoria', 'atendimento', 'operador'), async (req, res) => {
     const { id } = req.params;
     const client = await comConexaoTenant(req.usuario.associacao_id);
     try {
@@ -201,7 +201,7 @@ router.delete('/:id', autorizar('admin', 'diretoria'), async (req, res) => {
 // associação (mesmo critério do total_destinatarios em GET /comunicados) --
 // categoria_alvo é só rótulo informativo, não filtra quem recebe (ver
 // GET / acima, sem WHERE por categoria).
-router.get('/:id/leituras', autorizar('admin', 'diretoria'), async (req, res) => {
+router.get('/:id/leituras', autorizar('admin', 'diretoria', 'financeiro', 'atendimento', 'operador', 'consulta'), async (req, res) => {
     const { id } = req.params;
     const client = await comConexaoTenant(req.usuario.associacao_id);
     try {
@@ -233,7 +233,7 @@ router.get('/:id/leituras', autorizar('admin', 'diretoria'), async (req, res) =>
 // GET /comunicados/:id/leituras/exportar/:formato — mesma lista acima, em
 // Excel/PDF; registra a exportação como linha de auditoria (mesmo padrão
 // de GET /superadmin/logs/exportar/:formato).
-router.get('/:id/leituras/exportar/:formato', autorizar('admin', 'diretoria'), async (req, res) => {
+router.get('/:id/leituras/exportar/:formato', autorizar('admin', 'diretoria', 'financeiro', 'atendimento', 'operador', 'consulta'), async (req, res) => {
     const { id, formato } = req.params;
     if (!['excel', 'pdf'].includes(formato)) {
         return res.status(400).json({ erro: 'formato deve ser "excel" ou "pdf"' });

@@ -47,8 +47,8 @@ router.post('/', autorizar('admin'), async (req, res) => {
     if (!emailValido(email)) {
         return res.status(400).json({ erro: 'e-mail inválido' });
     }
-    if (!['diretoria', 'associado'].includes(papel)) {
-        return res.status(400).json({ erro: 'papel deve ser "diretoria" ou "associado"' });
+    if (!['diretoria', 'financeiro', 'atendimento', 'operador', 'consulta', 'associado'].includes(papel)) {
+        return res.status(400).json({ erro: 'papel inválido' });
     }
     if (papel === 'associado' && !associado_id) {
         return res.status(400).json({ erro: 'associado_id é obrigatório para o papel "associado"' });
@@ -296,7 +296,7 @@ router.put('/:id', autorizar('admin'), async (req, res) => {
     if (!nome || !nome.trim()) {
         return res.status(400).json({ erro: 'nome é obrigatório' });
     }
-    if (papel && !['admin', 'diretoria', 'associado'].includes(papel)) {
+    if (papel && !['admin', 'diretoria', 'financeiro', 'atendimento', 'operador', 'consulta', 'associado'].includes(papel)) {
         return res.status(400).json({ erro: 'papel inválido' });
     }
     if (id === req.usuario.id && papel && papel !== 'admin') {

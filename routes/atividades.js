@@ -10,7 +10,7 @@ router.use(bloquearTrialExpirado);
 // GET /atividades — últimas atividades da associação (cadastro/edição de
 // associado, pagamento registrado, comunicado publicado, usuário convidado),
 // mais recente primeiro. Alimenta o card "Atividades recentes" do Dashboard.
-router.get('/', autorizar('admin', 'diretoria'), async (req, res) => {
+router.get('/', autorizar('admin', 'diretoria', 'financeiro', 'atendimento', 'operador', 'consulta'), async (req, res) => {
     const client = await comConexaoTenant(req.usuario.associacao_id);
     try {
         const resultado = await client.query(

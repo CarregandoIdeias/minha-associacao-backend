@@ -14,7 +14,7 @@ router.use(bloquearTrialExpirado);
 // Paginação é opt-in via ?pagina=/?por_pagina=, mesmo raciocínio de
 // GET /associados (ver comentário lá) -- o Dashboard e os gráficos de
 // receita mensal dependem do array completo em cobrancasCache.
-router.get('/', autorizar('admin', 'diretoria'), async (req, res) => {
+router.get('/', autorizar('admin', 'diretoria', 'financeiro', 'atendimento', 'operador', 'consulta'), async (req, res) => {
     const { status, associado_id, pagina, por_pagina } = req.query;
     const client = await comConexaoTenant(req.usuario.associacao_id);
     try {
@@ -106,7 +106,7 @@ router.get('/', autorizar('admin', 'diretoria'), async (req, res) => {
 });
 
 // POST /cobrancas — cria uma nova cobrança (só admin/diretoria)
-router.post('/', autorizar('admin', 'diretoria'), async (req, res) => {
+router.post('/', autorizar('admin', 'diretoria', 'financeiro', 'operador'), async (req, res) => {
     const { associado_id, descricao, valor, vencimento } = req.body;
 
     if (!associado_id || !valor || !vencimento) {
@@ -140,7 +140,7 @@ router.post('/', autorizar('admin', 'diretoria'), async (req, res) => {
 });
 
 // PATCH /cobrancas/:id/pagar — marca uma cobrança como paga manualmente
-router.patch('/:id/pagar', autorizar('admin', 'diretoria'), async (req, res) => {
+router.patch('/:id/pagar', autorizar('admin', 'diretoria', 'financeiro', 'operador'), async (req, res) => {
     const { id } = req.params;
     const { metodo } = req.body;
 
@@ -247,7 +247,7 @@ router.patch('/:id/estornar', autorizar('admin'), async (req, res) => {
 });
 
 // GET /cobrancas/:id/comprovante — retorna o comprovante enviado pelo associado (admin/diretoria)
-router.get('/:id/comprovante', autorizar('admin', 'diretoria'), async (req, res) => {
+router.get('/:id/comprovante', autorizar('admin', 'diretoria', 'financeiro', 'atendimento', 'operador', 'consulta'), async (req, res) => {
     const { id } = req.params;
     res.set('Cache-Control', 'no-store');
     const client = await comConexaoTenant(req.usuario.associacao_id);
@@ -269,7 +269,7 @@ router.get('/:id/comprovante', autorizar('admin', 'diretoria'), async (req, res)
 });
 
 // PUT /cobrancas/:id — edita uma cobrança (só se ainda não estiver paga)
-router.put('/:id', autorizar('admin', 'diretoria'), async (req, res) => {
+router.put('/:id', autorizar('admin', 'diretoria', 'financeiro', 'operador'), async (req, res) => {
     const { id } = req.params;
     const { descricao, valor, vencimento } = req.body;
 

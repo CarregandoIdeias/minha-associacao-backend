@@ -47,7 +47,7 @@ function construirFiltros(query, associacaoId) {
 }
 
 // GET /auditoria — lista paginada com filtros (admin/diretoria)
-router.get('/', autorizar('admin', 'diretoria'), async (req, res) => {
+router.get('/', autorizar('admin', 'diretoria', 'financeiro', 'atendimento', 'operador', 'consulta'), async (req, res) => {
     const { pagina, por_pagina, ordenar } = req.query;
     const client = await comConexaoTenant(req.usuario.associacao_id);
     try {
@@ -88,7 +88,7 @@ router.get('/', autorizar('admin', 'diretoria'), async (req, res) => {
 });
 
 // GET /auditoria/exportar/:formato — mesmos filtros, sem paginação
-router.get('/exportar/:formato', autorizar('admin', 'diretoria'), async (req, res) => {
+router.get('/exportar/:formato', autorizar('admin', 'diretoria', 'financeiro', 'atendimento', 'operador', 'consulta'), async (req, res) => {
     const { formato } = req.params;
     if (!['excel', 'pdf'].includes(formato)) {
         return res.status(400).json({ erro: 'formato deve ser "excel" ou "pdf"' });

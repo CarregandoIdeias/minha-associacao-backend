@@ -24,7 +24,7 @@ router.use(bloquearTrialExpirado);
 // (associadosCache em painel/index.html). Adicionar LIMIT/OFFSET sem essa
 // distinção quebraria tudo isso -- a paginação de verdade na tela de
 // Associados (e mover a busca pro backend) é um passo futuro, separado.
-router.get('/', autorizar('admin', 'diretoria'), async (req, res) => {
+router.get('/', autorizar('admin', 'diretoria', 'financeiro', 'atendimento', 'operador', 'consulta'), async (req, res) => {
     const { pagina, por_pagina } = req.query;
     const client = await comConexaoTenant(req.usuario.associacao_id);
     try {
@@ -68,8 +68,8 @@ router.get('/', autorizar('admin', 'diretoria'), async (req, res) => {
 });
 
 // POST /associados — cria um associado e já provisiona o login dele com uma
-// senha gerada automaticamente (só admin/diretoria)
-router.post('/', autorizar('admin', 'diretoria'), async (req, res) => {
+// senha gerada automaticamente (admin/diretoria/atendimento/operador)
+router.post('/', autorizar('admin', 'diretoria', 'atendimento', 'operador'), async (req, res) => {
     const {
         nome_completo, cpf, telefone, categoria, observacao, email, rg,
         endereco_cep, endereco_logradouro, endereco_numero, endereco_complemento,
@@ -159,8 +159,8 @@ router.post('/', autorizar('admin', 'diretoria'), async (req, res) => {
     }
 });
 
-// PUT /associados/:id — edita um associado existente (só admin/diretoria)
-router.put('/:id', autorizar('admin', 'diretoria'), async (req, res) => {
+// PUT /associados/:id — edita um associado existente (admin/diretoria/atendimento/operador)
+router.put('/:id', autorizar('admin', 'diretoria', 'atendimento', 'operador'), async (req, res) => {
     const { id } = req.params;
     const {
         nome_completo, cpf, telefone, categoria, status, observacao, rg,
@@ -237,7 +237,7 @@ router.put('/:id', autorizar('admin', 'diretoria'), async (req, res) => {
 // esse associado específico, com status de leitura (item de sprint 2.3).
 // Mesma regra de visibilidade que o associado teria no portal dele (só
 // comunicados 'ativo' já publicados — ver routes/comunicados.js).
-router.get('/:id/comunicados', autorizar('admin', 'diretoria'), async (req, res) => {
+router.get('/:id/comunicados', autorizar('admin', 'diretoria', 'financeiro', 'atendimento', 'operador', 'consulta'), async (req, res) => {
     const { id } = req.params;
     const { lido } = req.query; // 'lidos' | 'nao_lidos' | ausente (todos)
     const client = await comConexaoTenant(req.usuario.associacao_id);
