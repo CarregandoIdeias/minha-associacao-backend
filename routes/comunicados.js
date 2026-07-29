@@ -1,6 +1,6 @@
 // routes/comunicados.js
 const express = require('express');
-const { autenticar, bloquearSenhaProvisoria, bloquearTrialExpirado, autorizar, comConexaoTenant } = require('../middleware/auth');
+const { autenticar, bloquearSenhaProvisoria, bloquearTrialExpirado, exigirPlano, autorizar, comConexaoTenant } = require('../middleware/auth');
 const { registrarAtividade } = require('../utils/atividadeLog');
 const { registrarLogAuditoria } = require('../utils/auditoria');
 const { gerarExcelLeituras, gerarPdfLeituras } = require('../utils/exportarLeiturasComunicado');
@@ -232,8 +232,9 @@ router.get('/:id/leituras', autorizar('admin', 'diretoria', 'financeiro', 'atend
 
 // GET /comunicados/:id/leituras/exportar/:formato — mesma lista acima, em
 // Excel/PDF; registra a exportação como linha de auditoria (mesmo padrão
-// de GET /superadmin/logs/exportar/:formato).
-router.get('/:id/leituras/exportar/:formato', autorizar('admin', 'diretoria', 'financeiro', 'atendimento', 'operador', 'consulta'), async (req, res) => {
+// de GET /superadmin/logs/exportar/:formato). Exigido plano Intermediário+
+// (gating por plano, 29/07/2026 — "Relatórios exportáveis" na landing).
+router.get('/:id/leituras/exportar/:formato', autorizar('admin', 'diretoria', 'financeiro', 'atendimento', 'operador', 'consulta'), exigirPlano('intermediario'), async (req, res) => {
     const { id, formato } = req.params;
     if (!['excel', 'pdf'].includes(formato)) {
         return res.status(400).json({ erro: 'formato deve ser "excel" ou "pdf"' });

@@ -2,6 +2,7 @@
 const jwt = require('jsonwebtoken');
 const pool = require('../db');
 const config = require('../config/env');
+const { planoAtendeNivel } = require('../utils/precos');
 
 const JWT_SECRET = config.jwtSecret;
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -110,6 +111,26 @@ function bloquearTrialExpirado(req, res, next) {
         });
     }
     next();
+}
+
+// Bloqueia uma funcionalidade que exige um plano superior ao contratado
+// (gating por plano, 29/07/2026 — ver painel/CLAUDE.md/backend/CLAUDE.md,
+// seção "Gating de funcionalidades por plano"). Usar depois de autorizar()
+// nas rotas que só devem funcionar a partir de um plano mínimo. Diferente
+// de bloquearTrialExpirado: aqui a associação continua com acesso normal
+// à plataforma, só essa funcionalidade específica fica indisponível.
+// req.usuario.plano já vem sempre fresco do banco (ver autenticar() acima).
+function exigirPlano(nivelMinimo) {
+    return (req, res, next) => {
+        if (!req.usuario || !planoAtendeNivel(req.usuario.plano, nivelMinimo)) {
+            return res.status(403).json({
+                erro: 'Esse recurso não está disponível no seu plano atual. Faça upgrade para continuar.',
+                codigo: 'PLANO_INSUFICIENTE',
+                plano_necessario: nivelMinimo,
+            });
+        }
+        next();
+    };
 }
 
 // Garante que só determinados papéis acessem a rota
@@ -264,6 +285,7 @@ module.exports = {
     autenticar,
     bloquearSenhaProvisoria,
     bloquearTrialExpirado,
+    exigirPlano,
     autorizar,
     comConexaoTenant,
     autenticarSuperAdmin,

@@ -4,6 +4,16 @@ const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 const { autenticar, bloquearSenhaProvisoria, bloquearTrialExpirado, autorizar, comConexaoTenant } = require('../middleware/auth');
 const { emailValido, gerarSenhaProvisoria } = require('../utils/validacao');
+const { planoAtendeNivel } = require('../utils/precos');
+
+// Perfis de acesso granulares (item 5 do backlog, 28/07/2026) são
+// diferencial do plano Intermediário+ na landing page (29/07/2026) --
+// gating por plano, com grandfathering: só bloqueia ATRIBUIR um desses
+// papéis agora (criar ou editar); usuário que já tinha um desses papéis
+// antes de a associação estar num plano que não permite continua
+// funcionando normalmente (a checagem não roda em cima de dado existente,
+// só na hora de gravar um valor novo).
+const PAPEIS_GRANULARES = ['financeiro', 'atendimento', 'operador', 'consulta'];
 const { registrarEventoAuth } = require('../utils/authLog');
 const { registrarAtividade } = require('../utils/atividadeLog');
 const { registrarLogAuditoria } = require('../utils/auditoria');
@@ -52,6 +62,13 @@ router.post('/', autorizar('admin'), async (req, res) => {
     }
     if (papel === 'associado' && !associado_id) {
         return res.status(400).json({ erro: 'associado_id é obrigatório para o papel "associado"' });
+    }
+    if (PAPEIS_GRANULARES.includes(papel) && !planoAtendeNivel(req.usuario.plano, 'intermediario')) {
+        return res.status(403).json({
+            erro: 'Perfis de acesso granulares (Financeiro, Atendimento, Operador, Somente Consulta) exigem o plano Intermediário ou superior.',
+            codigo: 'PLANO_INSUFICIENTE',
+            plano_necessario: 'intermediario',
+        });
     }
 
     // Gerado/hasheado antes de pegar a conexão -- ver mesmo comentário em
@@ -301,6 +318,18 @@ router.put('/:id', autorizar('admin'), async (req, res) => {
     }
     if (id === req.usuario.id && papel && papel !== 'admin') {
         return res.status(400).json({ erro: 'Você não pode alterar o seu próprio papel' });
+    }
+    // Gating por plano só quando um papel NOVO está sendo atribuído (ver
+    // PAPEIS_GRANULARES acima) -- editar só o nome (papel undefined) nunca
+    // passa por aqui, então um usuário já cadastrado num papel granular
+    // continua com o papel intacto mesmo se a associação estiver num plano
+    // que não permitiria atribuí-lo agora.
+    if (papel && PAPEIS_GRANULARES.includes(papel) && !planoAtendeNivel(req.usuario.plano, 'intermediario')) {
+        return res.status(403).json({
+            erro: 'Perfis de acesso granulares (Financeiro, Atendimento, Operador, Somente Consulta) exigem o plano Intermediário ou superior.',
+            codigo: 'PLANO_INSUFICIENTE',
+            plano_necessario: 'intermediario',
+        });
     }
 
     const client = await comConexaoTenant(req.usuario.associacao_id);

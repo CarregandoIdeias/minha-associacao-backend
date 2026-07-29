@@ -8,6 +8,28 @@ const PRECOS_PLANO = {
     avancado: { base: 199.90, porAssociado: 1.00 },
 };
 
+// Faixa de associados de cada porte, só informativa (avisa a associação
+// que está perto do limite do plano contratado) -- NÃO bloqueia o cadastro
+// de novos associados, é decisão de produto (upsell, não trava). null =
+// sem teto. Ver GET /plano (routes/plano.js).
+const LIMITE_ASSOCIADOS_PLANO = { trial: null, basico: 50, intermediario: 200, avancado: null };
+
+// Hierarquia de planos pra gating de funcionalidades (item 29/07/2026,
+// "Fase 2" do backlog de melhorias). Trial recebe o nível mais alto de
+// propósito -- a promessa comercial é "acesso completo a todos os
+// recursos" durante o período de avaliação, ver painel/landing.html.
+const NIVEL_PLANO = { trial: 99, basico: 1, intermediario: 2, avancado: 3 };
+
+// Usado por middleware/auth.js (exigirPlano) e pelas rotas que fazem a
+// checagem condicional (ex.: routes/usuarios.js, ao atribuir um papel
+// granular). planoAtual pode vir undefined/null (não deveria, mas por
+// segurança nesse caso nunca atende nenhum nível mínimo > 0).
+function planoAtendeNivel(planoAtual, nivelMinimo) {
+    const nivelAtual = NIVEL_PLANO[planoAtual] != null ? NIVEL_PLANO[planoAtual] : 0;
+    const nivelExigido = NIVEL_PLANO[nivelMinimo] != null ? NIVEL_PLANO[nivelMinimo] : 0;
+    return nivelAtual >= nivelExigido;
+}
+
 // valorManual (associacoes.valor_mensalidade_manual) sempre tem prioridade —
 // é a sobrescrita usada pra cobrança negociada fora da fórmula padrão.
 function calcularValorMensalidade(plano, totalAssociados, valorManual) {
@@ -77,4 +99,12 @@ function alertaAssinatura(associacao, hoje) {
     return { tipo: 'assinatura', dias_restantes: diasRestantes, nivel: nivel };
 }
 
-module.exports = { PRECOS_PLANO, calcularValorMensalidade, statusAssinatura, alertaAssinatura };
+module.exports = {
+    PRECOS_PLANO,
+    LIMITE_ASSOCIADOS_PLANO,
+    NIVEL_PLANO,
+    planoAtendeNivel,
+    calcularValorMensalidade,
+    statusAssinatura,
+    alertaAssinatura,
+};

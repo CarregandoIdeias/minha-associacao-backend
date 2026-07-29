@@ -9,7 +9,7 @@ const express = require('express');
 const { autenticar, bloquearSenhaProvisoria, autorizar, comConexaoTenant } = require('../middleware/auth');
 const { registrarLogAuditoria } = require('../utils/auditoria');
 const { comprovanteBase64Valido } = require('../utils/validacao');
-const { calcularValorMensalidade, statusAssinatura, alertaAssinatura } = require('../utils/precos');
+const { calcularValorMensalidade, statusAssinatura, alertaAssinatura, LIMITE_ASSOCIADOS_PLANO } = require('../utils/precos');
 
 const router = express.Router();
 router.use(autenticar);
@@ -53,6 +53,12 @@ router.get('/', autorizar('admin', 'diretoria'), async (req, res) => {
             [req.usuario.associacao_id]
         );
 
+        // Limite de associados é só informativo (upsell) -- nunca bloqueia
+        // o cadastro, ver POST /associados (sem checagem de teto lá de
+        // propósito). "Perto do limite" = 90% ou mais da faixa do plano.
+        const limiteAssociados = LIMITE_ASSOCIADOS_PLANO[a.plano] != null ? LIMITE_ASSOCIADOS_PLANO[a.plano] : null;
+        const pertoDoLimite = limiteAssociados != null && total >= limiteAssociados * 0.9;
+
         res.json({
             plano: a.plano,
             trial_dias: a.trial_dias,
@@ -60,6 +66,8 @@ router.get('/', autorizar('admin', 'diretoria'), async (req, res) => {
             vencimento_assinatura: a.vencimento_assinatura,
             valor_mensalidade: calcularValorMensalidade(a.plano, total, a.valor_mensalidade_manual),
             total_associados: total,
+            limite_associados: limiteAssociados,
+            perto_do_limite: pertoDoLimite,
             status: statusAssinatura(a),
             alerta: alertaAssinatura(a),
             pix_plataforma: pixPlataforma.rows[0] || { chave_pix: null, nome_recebedor_pix: null, cidade_pix: null },

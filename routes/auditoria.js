@@ -6,7 +6,7 @@
 // em vez de cross-tenant. Só admin/diretoria vêem (mesmo nível de acesso
 // de Usuários).
 const express = require('express');
-const { autenticar, bloquearSenhaProvisoria, bloquearTrialExpirado, autorizar, comConexaoTenant } = require('../middleware/auth');
+const { autenticar, bloquearSenhaProvisoria, bloquearTrialExpirado, exigirPlano, autorizar, comConexaoTenant } = require('../middleware/auth');
 const { registrarLogAuditoria } = require('../utils/auditoria');
 const { gerarExcelLogs, gerarPdfLogs } = require('../utils/exportarLogs');
 
@@ -46,8 +46,10 @@ function construirFiltros(query, associacaoId) {
     return { where: 'WHERE ' + condicoes.join(' AND '), valores };
 }
 
-// GET /auditoria — lista paginada com filtros (admin/diretoria)
-router.get('/', autorizar('admin', 'diretoria', 'financeiro', 'atendimento', 'operador', 'consulta'), async (req, res) => {
+// GET /auditoria — lista paginada com filtros (admin/diretoria). Exigido
+// plano Avançado (gating por plano, 29/07/2026 — "Auditoria completa" é
+// diferencial exclusivo desse plano na landing page).
+router.get('/', autorizar('admin', 'diretoria', 'financeiro', 'atendimento', 'operador', 'consulta'), exigirPlano('avancado'), async (req, res) => {
     const { pagina, por_pagina, ordenar } = req.query;
     const client = await comConexaoTenant(req.usuario.associacao_id);
     try {
@@ -87,8 +89,9 @@ router.get('/', autorizar('admin', 'diretoria', 'financeiro', 'atendimento', 'op
     }
 });
 
-// GET /auditoria/exportar/:formato — mesmos filtros, sem paginação
-router.get('/exportar/:formato', autorizar('admin', 'diretoria', 'financeiro', 'atendimento', 'operador', 'consulta'), async (req, res) => {
+// GET /auditoria/exportar/:formato — mesmos filtros, sem paginação. Mesmo
+// gate de plano Avançado da listagem acima.
+router.get('/exportar/:formato', autorizar('admin', 'diretoria', 'financeiro', 'atendimento', 'operador', 'consulta'), exigirPlano('avancado'), async (req, res) => {
     const { formato } = req.params;
     if (!['excel', 'pdf'].includes(formato)) {
         return res.status(400).json({ erro: 'formato deve ser "excel" ou "pdf"' });

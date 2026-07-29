@@ -1,6 +1,6 @@
 // routes/configuracoes.js
 const express = require('express');
-const { autenticar, bloquearSenhaProvisoria, bloquearTrialExpirado, autorizar, comConexaoTenant } = require('../middleware/auth');
+const { autenticar, bloquearSenhaProvisoria, bloquearTrialExpirado, exigirPlano, autorizar, comConexaoTenant } = require('../middleware/auth');
 const { registrarLogAuditoria } = require('../utils/auditoria');
 const { imagemBase64Valida } = require('../utils/validacao');
 
@@ -138,8 +138,12 @@ router.get('/alertas', async (req, res) => {
     }
 });
 
-// PUT /configuracoes/alertas — só admin configura
-router.put('/alertas', autorizar('admin'), async (req, res) => {
+// PUT /configuracoes/alertas — só admin configura, e só a partir do plano
+// Intermediário (gating por plano, 29/07/2026 — landing page anuncia
+// "Alertas automáticos de vencimento" como diferencial a partir daí; no
+// Básico o valor fica travado no default, ler GET acima continua liberado
+// pra qualquer papel/plano, só a edição é bloqueada).
+router.put('/alertas', autorizar('admin'), exigirPlano('intermediario'), async (req, res) => {
     const { dias_alerta_vencimento } = req.body;
     const dias = parseInt(dias_alerta_vencimento, 10);
 

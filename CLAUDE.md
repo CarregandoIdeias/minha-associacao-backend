@@ -11,6 +11,105 @@ associações — Super Admin cadastra associações-clientes, cada uma com seu
 admin/diretoria/associados isolados das outras. Front-end em
 `../painel` (HTML/JS puro, repositório separado), consome essa API.
 
+## Gating de funcionalidades por plano (Fase 2 da melhoria de planos, 29/07/2026)
+
+Depois de renomear os planos (seção seguinte), implementado o gating de
+verdade — antes disso nenhuma das funcionalidades que a `landing.html`
+anuncia por plano tinha qualquer diferenciação no código, todas
+funcionavam igual pra Básico/Intermediário/Avançado. Matriz confirmada
+com o usuário antes de escrever código (mesmo cuidado que os perfis de
+acesso granulares tiveram em 28/07):
+
+| Funcionalidade | Básico | Intermediário | Avançado |
+|---|:---:|:---:|:---:|
+| Alertas automáticos de vencimento (editar) | ❌ | ✅ | ✅ |
+| Perfis de acesso granulares (atribuir) | ❌ | ✅ | ✅ |
+| Exportar leituras de comunicado (Excel/PDF) | ❌ | ✅ | ✅ |
+| Carteirinha digital do associado | ❌ | ✅ | ✅ |
+| Auditoria (ver + exportar) | ❌ | ❌ | ✅ |
+| Limite de associados (50/200/∞) | aviso apenas, nunca bloqueia | | |
+
+Três decisões de produto confirmadas antes de implementar:
+1. **Grandfathering**: quem já usa uma funcionalidade continua usando —
+   só bloqueia atribuir/configurar algo NOVO além do que o plano permite.
+   Nenhuma migration de dados existentes, nenhum usuário/config existente
+   é tocado.
+2. **Limite de associados nunca bloqueia** — é só aviso/upsell no
+   Dashboard (`GET /plano`, campos novos `limite_associados`/
+   `perto_do_limite`). `POST /associados` continua sem nenhuma checagem
+   de teto, de propósito.
+3. **Enforcement é backend real (403) + esconder no front** — mesmo
+   padrão de segurança já usado nos perfis granulares (28/07): esconder só
+   no front nunca é a proteção de verdade.
+
+**`utils/precos.js`** ganhou `NIVEL_PLANO` (hierarquia — `trial: 99,
+basico: 1, intermediario: 2, avancado: 3`; trial recebe o nível mais alto
+porque a promessa comercial da landing é "acesso completo a todos os
+recursos" durante a avaliação), `planoAtendeNivel(planoAtual,
+nivelMinimo)` e `LIMITE_ASSOCIADOS_PLANO` (`{ basico: 50, intermediario:
+200, avancado: null }`, só informativo).
+
+**`middleware/auth.js`** ganhou `exigirPlano(nivelMinimo)`, no mesmo
+molde de `bloquearTrialExpirado` — usar depois de `autorizar(...)` na
+rota. Reaproveita `req.usuario.plano`, que já vinha fresco do banco a
+cada requisição desde o trial (ver seção "Plano Trial com expiração"
+abaixo) — não precisou de nenhuma query nova. Resposta 403 padronizada:
+`{ erro, codigo: 'PLANO_INSUFICIENTE', plano_necessario }`.
+
+Aplicado:
+- `PUT /configuracoes/alertas` → `exigirPlano('intermediario')`. `GET`
+  continua liberado pra qualquer plano/papel (ler o valor atual não é o
+  que está sendo vendido, configurá-lo é).
+- `GET /comunicados/:id/leituras/exportar/:formato` →
+  `exigirPlano('intermediario')`.
+- `GET /auditoria` e `GET /auditoria/exportar/:formato` →
+  `exigirPlano('avancado')` (mais restrito que o resto — nem o
+  Intermediário libera).
+- `POST /usuarios` e `PUT /usuarios/:id` (`routes/usuarios.js`) — **não**
+  usa `exigirPlano` como middleware de rota inteira (a rota aceita vários
+  papéis, só alguns são gated). Checagem condicional inline: só bloqueia
+  quando `papel` do corpo da requisição é um de `PAPEIS_GRANULARES`
+  (`financeiro/atendimento/operador/consulta`) **e** o plano não atende.
+  Em `PUT`, como `papel` é opcional (`COALESCE` mantém o valor atual se
+  não vier no corpo), editar só o nome de um usuário já-financeiro nunca
+  passa pela checagem — é assim que o grandfathering funciona sem
+  precisar de nenhuma lógica extra de "usuário legado".
+- Carteirinha digital (`portal.html`) **não tem checagem de backend** —
+  é montada inteiramente com dado que `GET /portal/meus-dados` já expõe
+  pro próprio associado (nome, foto, categoria, status), não existe um
+  recurso adicional pra proteger no servidor. O gate aqui é só de UI
+  (esconder o botão), documentado como exceção deliberada à regra
+  "backend + front" — não haveria o que bloquear no backend sem inventar
+  uma rota nova só pra isso.
+
+**JWT ganhou o claim `plano`** (`assinarToken`, `routes/auth.js`) — só
+pra decisão de UI no front (qualquer papel de usuário, não só admin/
+diretoria, precisa saber o plano pra esconder botão/aba). Buscado junto
+no `SELECT` de `buscarUsuarioPorEmail` (`a.plano`, já tinha o JOIN com
+`associacoes`). **Nunca é a fonte de verdade da permissão real** — o
+bloqueio de fato é sempre `exigirPlano()` no backend, que revalida
+`req.usuario.plano` fresco do banco a cada requisição (não confia no
+claim do token, que pode ficar até 8h desatualizado se o plano mudar no
+meio da sessão — mesmo caveat que já existia pra `papel`/`nome` antes
+disso, não é uma classe nova de risco).
+
+**`GET /plano`** ganhou `limite_associados` e `perto_do_limite` (>= 90%
+da faixa do plano) — só leitura, `POST /associados` continua sem
+nenhuma checagem de limite.
+
+**Testado em staging** com 3 associações de teste (uma por plano,
+`TESTE_GATING_basico/intermediario/avancado`, criadas e apagadas via
+`comConexaoSuperAdmin`) via `curl` direto contra `node server.js` local
+apontando pro banco de staging: os 3 gates 403 confirmados por plano
+(alertas, auditoria, atribuir papel granular), grandfathering confirmado
+(usuário `financeiro` inserido diretamente no banco pra simular "já
+existia antes do gating" — login funcionou normalmente, editar só o nome
+funcionou, trocar pra outro papel granular foi bloqueado, trocar pra um
+papel não-granular como `diretoria` funcionou), export de leituras
+bloqueado no Básico e funcionando no Intermediário (Excel real gerado,
+6.5KB), `GET /plano` com `limite_associados`/`perto_do_limite` corretos
+pros 3 planos.
+
 ## Planos renomeados: profissional/enterprise → intermediario/avancado (29/07/2026)
 
 Alinhamento com a nova nomenclatura da landing page (`painel/landing.html`,

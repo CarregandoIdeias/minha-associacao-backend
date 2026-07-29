@@ -22,6 +22,14 @@ function assinarToken(usuario) {
             papel: usuario.papel,
             email: usuario.email,
             deve_trocar_senha: usuario.deve_trocar_senha,
+            // Só pra decisão de UI no front (esconder botão de recurso não
+            // incluído no plano, ver painel/CLAUDE.md "Gating de
+            // funcionalidades por plano") -- sem verificação de assinatura
+            // do lado do cliente, então nunca é a fonte de verdade da
+            // permissão real. O bloqueio de fato é sempre no backend
+            // (exigirPlano, middleware/auth.js), que revalida o plano
+            // fresco do banco a cada requisição, não confia nesse claim.
+            plano: usuario.plano,
         },
         JWT_SECRET,
         { expiresIn: '8h' }
@@ -130,7 +138,7 @@ async function buscarUsuarioPorEmail(email) {
         try {
             const resultado = await client.query(
                 `SELECT u.id, u.nome, u.email, u.senha_hash, u.papel, u.associacao_id, u.ativo, u.deve_trocar_senha,
-                        a.ativo AS associacao_ativa
+                        a.ativo AS associacao_ativa, a.plano
                  FROM usuarios u
                  JOIN associacoes a ON a.id = u.associacao_id
                  WHERE lower(u.email) = lower($1)`,
