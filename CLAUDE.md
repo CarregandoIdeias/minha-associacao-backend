@@ -11,6 +11,43 @@ associações — Super Admin cadastra associações-clientes, cada uma com seu
 admin/diretoria/associados isolados das outras. Front-end em
 `../painel` (HTML/JS puro, repositório separado), consome essa API.
 
+## Planos renomeados: profissional/enterprise → intermediario/avancado (29/07/2026)
+
+Alinhamento com a nova nomenclatura da landing page (`painel/landing.html`,
+ver `painel/CLAUDE.md`): Básico/Intermediário/Avançado em vez de
+Básico/Profissional/Enterprise. Preços e faixas de porte **não mudaram**,
+só o nome.
+
+Migration `20260729000000_renomear_planos_intermediario_avancado.sql`:
+`ALTER TYPE plano_assinatura RENAME VALUE 'profissional' TO 'intermediario'`
+e o mesmo para `'enterprise' TO 'avancado'`. **`RENAME VALUE` só troca o
+rótulo no catálogo do tipo (`pg_enum`)** — o valor interno (oid) não muda,
+então nenhuma linha de `associacoes.plano` precisou de `UPDATE`; qualquer
+associação que já estava em `profissional` passa a aparecer como
+`intermediario` automaticamente, sem migração de dados. Testado em staging
+antes do deploy: `enum_range` confirmado (`trial, basico, intermediario,
+avancado`), insert/select/update/delete numa associação de teste
+(`TESTE_MIGRATION_PLANOS`, criada e apagada via `comConexaoSuperAdmin`) e
+`calcularValorMensalidade()` batendo com os valores da landing page
+(R$ 249,90 com 100 associados no Intermediário, R$ 499,90 com 300 no
+Avançado).
+
+Valores internos do enum continuam **sem acento** (`intermediario`,
+`avancado`), seguindo o padrão já usado por `trial`/`basico` — acentuação
+só existe nos rótulos exibidos no front (`ROTULOS_PLANO`/`INFO_PLANO`).
+
+Atualizado em conjunto: `utils/precos.js` (chaves de `PRECOS_PLANO`),
+`routes/plano.js` (`PLANOS_CONTRATAVEIS`, mensagem de erro de validação).
+`routes/superadmin.js` não precisou de mudança — não tem whitelist própria
+de valores de plano, o enum do banco já rejeita qualquer valor fora da
+lista. Ver `painel/CLAUDE.md` pra a parte do front (`superadmin.html`,
+`index.html`).
+
+**Se migrar produção**: mesmo comando, rodado no SQL Editor do Supabase de
+produção (`gahrgdpjuqfjkznqtszd`) depois de validado em staging — só
+depois de confirmação explícita do usuário, seguindo o fluxo já
+estabelecido pro projeto.
+
 ## Ambiente de homologação (staging) — novo (27/07/2026)
 
 Até aqui só existia produção (ver seção seguinte). Passou a existir um

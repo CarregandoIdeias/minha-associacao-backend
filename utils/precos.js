@@ -4,8 +4,8 @@
 const PRECOS_PLANO = {
     trial: { base: 0, porAssociado: 0 },
     basico: { base: 49.90, porAssociado: 2.00 },
-    profissional: { base: 99.90, porAssociado: 1.50 },
-    enterprise: { base: 199.90, porAssociado: 1.00 },
+    intermediario: { base: 99.90, porAssociado: 1.50 },
+    avancado: { base: 199.90, porAssociado: 1.00 },
 };
 
 // valorManual (associacoes.valor_mensalidade_manual) sempre tem prioridade —

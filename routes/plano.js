@@ -15,7 +15,7 @@ const router = express.Router();
 router.use(autenticar);
 router.use(bloquearSenhaProvisoria);
 
-const PLANOS_CONTRATAVEIS = ['basico', 'profissional', 'enterprise'];
+const PLANOS_CONTRATAVEIS = ['basico', 'intermediario', 'avancado'];
 
 // GET /plano — dados de plano/trial da associação logada, pra montar o card
 // do Dashboard (trial em andamento, plano pago ativo, ou trial expirado) e a
@@ -80,7 +80,7 @@ router.post('/solicitar-contratacao', autorizar('admin'), async (req, res) => {
     const { plano_solicitado, comprovante_base64 } = req.body;
 
     if (!plano_solicitado || !PLANOS_CONTRATAVEIS.includes(plano_solicitado)) {
-        return res.status(400).json({ erro: 'plano_solicitado deve ser "basico", "profissional" ou "enterprise"' });
+        return res.status(400).json({ erro: 'plano_solicitado deve ser "basico", "intermediario" ou "avancado"' });
     }
     if (!comprovante_base64) {
         return res.status(400).json({ erro: 'comprovante_base64 é obrigatório' });
