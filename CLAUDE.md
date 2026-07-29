@@ -645,6 +645,46 @@ Três pedidos separados do usuário no mesmo dia, todos só aditivos:
 
 **Gap real encontrado e corrigido de quebra**: `POST /comunicados/:id/marcar-lido` existia desde a Fase 3 (confirmação de leitura, item de sprint 3) mas **nunca tinha um consumidor no `portal.html`** — o associado nunca "marcava como lido" de fato, então o contador de não lidos nunca zeraria. Sem mudança de backend (a rota já existia e já funcionava pra qualquer papel autenticado); só o front passou a chamá-la ao abrir o mural.
 
+## Comunicado da plataforma pra todas as associações (28/07/2026, item 7 do backlog de sugestões)
+
+Depois da análise profunda pedida pelo usuário sobre as 3 camadas
+(Super Admin/associação/associado), o primeiro item do backlog resultante
+a ser implementado: o Super Admin não tinha como avisar todas as
+associações de uma vez (só existia comunicado por associação, escrito
+pela própria diretoria).
+
+`comunicados` ganhou `origem_plataforma boolean NOT NULL DEFAULT false`
+(migration `20260728000000_comunicados_plataforma.sql`, aditiva). Nova
+rota `POST /superadmin/comunicados-plataforma` (`autorizarSuperAdmin(...GESTAO)`,
+`routes/superadmin.js`) recebe `titulo`/`conteudo` e faz um `INSERT` em
+`comunicados` **por associação ativa** (`autor_id = NULL`, super-admin não
+é um `usuario` de tenant) — reaproveita o mural que cada associação já
+tem, **nenhuma tabela nem tela de leitura nova precisou ser criada**. Uma
+única linha de auditoria registra o envio (com `total_associacoes` em
+`dados_novos`, não uma linha por associação atingida).
+
+`PUT`/`DELETE /comunicados/:id` (`routes/comunicados.js`) passaram a
+checar `origem_plataforma` antes de aplicar a mudança — 403 se for
+`true`, mesmo pra quem tem papel `admin`/`diretoria` na própria
+associação. Isso existe porque o texto de um aviso oficial da plataforma
+não pode ser adulterado ou apagado por quem só recebeu, só a origem
+(Super Admin) deveria poder gerenciar — e hoje nem o Super Admin tem uma
+rota de edição em massa desses avisos (só criar um novo, se precisar
+corrigir algo é reenviar).
+
+**Testado contra staging com o mesmo padrão de sempre** (associações +
+super-admin de teste via `comConexaoSuperAdmin()`, tudo apagado depois) —
+um detalhe que quase passou despercebido: o broadcast **atingiu uma
+associação real pré-existente no staging** (`Associação_teste1`, não
+criada por esta sessão), porque a rota varre *todas* as associações
+ativas do banco, não só as de teste. Precisou de uma limpeza extra fora
+do fluxo normal do script pra remover só aquela linha de comunicado, sem
+mexer na associação em si. **Lição pra quem for testar rotas de broadcast
+cross-tenant no futuro**: usar sempre um texto de teste claramente
+identificável (ex. prefixo `TESTE_`) mesmo em campos que não são o nome
+da entidade de teste, e checar depois em **todas** as associações
+atingidas, não só nas criadas pelo próprio teste.
+
 ## Isolamento entre tenants (RLS) — já está ativo
 
 Não é só disciplina de código (`WHERE associacao_id = $1` em toda query,
