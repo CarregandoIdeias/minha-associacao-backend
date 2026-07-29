@@ -645,6 +645,29 @@ Três pedidos separados do usuário no mesmo dia, todos só aditivos:
 
 **Gap real encontrado e corrigido de quebra**: `POST /comunicados/:id/marcar-lido` existia desde a Fase 3 (confirmação de leitura, item de sprint 3) mas **nunca tinha um consumidor no `portal.html`** — o associado nunca "marcava como lido" de fato, então o contador de não lidos nunca zeraria. Sem mudança de backend (a rota já existia e já funcionava pra qualquer papel autenticado); só o front passou a chamá-la ao abrir o mural.
 
+## Paginação opt-in em /associados e /cobrancas (28/07/2026, item 6 do backlog de sugestões)
+
+`GET /associados` e `GET /cobrancas` aceitam `?pagina=`/`?por_pagina=`
+(máx. 200/página, mesmo padrão de `GET /auditoria`) e devolvem
+`{ registros, total, pagina, por_pagina }` **só quando esses parâmetros
+vêm na query**. Sem eles, a resposta continua sendo o array puro de
+sempre — decisão deliberada, não meio-termo preguiçoso: o Dashboard do
+painel da associação (KPIs, gráficos de crescimento/receita de 12 meses,
+"últimos associados") e a busca instantânea das telas de Associados/
+Financeiro dependem hoje de ter o array **completo** no cliente
+(`associadosCache`/`cobrancasCache` em `painel/index.html`). Paginar sem
+essa distinção quebraria tudo isso na hora.
+
+**O que isso resolve e o que não resolve**: resolve o "não escala" citado
+na análise (dá pra uma tela nova, ou uma versão futura da lista, pedir só
+50 registros por vez sem sobrecarregar o Postgres numa associação com
+milhares de associados). **Não resolve** a causa raiz de fato — a lista
+de Associados/Financeiro em `index.html` ainda carrega tudo de uma vez
+hoje, porque adotar paginação de verdade nessas telas exigiria mover a
+busca/filtro pro backend também (a busca atual é 100% client-side sobre
+o array já em memória). Isso fica pra quando/se o volume real justificar
+—- a capacidade já existe no backend, só não foi adotada no front ainda.
+
 ## Comunicado da plataforma pra todas as associações (28/07/2026, item 7 do backlog de sugestões)
 
 Depois da análise profunda pedida pelo usuário sobre as 3 camadas
