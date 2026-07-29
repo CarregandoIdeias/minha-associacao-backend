@@ -80,6 +80,28 @@ qualquer momento; mudanças que afetam quem já está conectado (trocar
 coordenadas com o deploy — ver `supabase/README.md`, seção RLS, que
 documenta um incidente real causado por não seguir essa ordem.
 
+**Isso aconteceu de verdade em 28/07/2026**: o `.env` local estava com a
+`DATABASE_URL` de **produção** (`db.gahrgdpjuqfjkznqtszd.supabase.co`,
+conexão direta, nem era o pooler) enquanto se acreditava (confirmado
+verbalmente, sem checar de fato) que era staging. Dois fluxos de teste
+ponta a ponta (upload de logo da associação, ficha do associado — ambos
+criando associação/usuário de teste via `pool.query` direto e apagando
+depois) rodaram sem querer contra produção antes do engano ser percebido
+— só descoberto quando uma migration deu "column already exists" no
+Supabase (sinal de que só produção já tinha aquela coluna). Sem dano
+porque a limpeza dos dados de teste sempre rodou e foi conferida vazia
+logo em seguida, mas foi sorte de o hábito de limpar já existir, não
+segurança de processo. **Os dois refs corretos, pra conferir sempre antes
+de rodar algo local:**
+- Produção: `minha_associacao`, ref `gahrgdpjuqfjkznqtszd`.
+- Staging: `minha-associacao-staging`, ref `dlthgkvvzyssmkzehksz`, pooler
+  `aws-0-sa-east-1.pooler.supabase.com:5432`, usuário
+  `app_runtime.dlthgkvvzyssmkzehksz`.
+
+Não basta perguntar "é staging?" e aceitar um "sim" — conferir o próprio
+host/ref da `DATABASE_URL` contra essa lista antes de rodar qualquer
+script que crie/apague dado, mesmo que seja "só um teste rápido".
+
 ## Arquitetura em uma imagem
 
 - `server.js` → monta as rotas, `config/env.js` valida env vars e derruba
@@ -612,6 +634,16 @@ do Super Admin — não foi tocada). `GET /plano` (`routes/plano.js`) devolve
 esse objeto em `alerta`; o card `#bloco-plano-dashboard` em
 `painel/index.html` usa isso pra decidir mensagem, cor e se pulsa — ver
 `painel/CLAUDE.md`.
+
+## Melhorias no portal do associado — mini-dashboard, logo da associação, ficha completa (28/07/2026)
+
+Três pedidos separados do usuário no mesmo dia, todos só aditivos:
+
+- **Logo da associação**: `PUT /configuracoes/logo` (novo, `routes/configuracoes.js`, só `admin`) — antes só o Super Admin podia trocar `associacoes.logo_url` (já exibida no header do Dashboard desde 27/07); agora a própria associação também pode, reaproveitando `imagemBase64Valida()` e o mesmo limite de ~2,8MB de `PUT /portal/minha-foto`.
+- **`GET /portal/meus-dados`** ganhou `rg`, `endereco_*` (já existiam em `associados` desde a migration `20260727150000_ficha_associado.sql`, só não eram expostas nessa rota) e `criado_em`, pra alimentar a ficha completa nova no portal (`painel/CLAUDE.md` tem o detalhe do front). **Não inclui `email`** — `associados` não tem essa coluna (o e-mail de login vive em `usuarios`); o front já tinha esse dado disponível decodificando o próprio JWT (`estado.email`), não precisou de rota nova nem de JOIN.
+- Nenhuma rota nova para o mini-dashboard "Início" do portal — reaproveita `GET /portal/meus-dados`, `GET /portal/minhas-cobrancas` e `GET /comunicados`, todas já existentes.
+
+**Gap real encontrado e corrigido de quebra**: `POST /comunicados/:id/marcar-lido` existia desde a Fase 3 (confirmação de leitura, item de sprint 3) mas **nunca tinha um consumidor no `portal.html`** — o associado nunca "marcava como lido" de fato, então o contador de não lidos nunca zeraria. Sem mudança de backend (a rota já existia e já funcionava pra qualquer papel autenticado); só o front passou a chamá-la ao abrir o mural.
 
 ## Isolamento entre tenants (RLS) — já está ativo
 
