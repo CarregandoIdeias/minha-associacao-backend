@@ -10,8 +10,12 @@ router.use(bloquearSenhaProvisoria);
 router.use(bloquearTrialExpirado);
 
 // GET /cobrancas — lista cobranças da associação, com filtro opcional por status ou associado (só admin/diretoria)
+//
+// Paginação é opt-in via ?pagina=/?por_pagina=, mesmo raciocínio de
+// GET /associados (ver comentário lá) -- o Dashboard e os gráficos de
+// receita mensal dependem do array completo em cobrancasCache.
 router.get('/', autorizar('admin', 'diretoria'), async (req, res) => {
-    const { status, associado_id } = req.query;
+    const { status, associado_id, pagina, por_pagina } = req.query;
     const client = await comConexaoTenant(req.usuario.associacao_id);
     try {
         const condicoes = [];
@@ -30,6 +34,25 @@ router.get('/', autorizar('admin', 'diretoria'), async (req, res) => {
         }
 
         const where = `WHERE ${condicoes.join(' AND ')}`;
+        const paginado = pagina != null || por_pagina != null;
+
+        let total = null;
+        let limitOffsetSql = '';
+        let valoresConsulta = valores;
+        if (paginado) {
+            const limite = Math.min(parseInt(por_pagina, 10) || 50, 200);
+            const paginaAtual = Math.max(parseInt(pagina, 10) || 1, 1);
+            const offset = (paginaAtual - 1) * limite;
+
+            const totalResultado = await client.query(
+                `SELECT COUNT(*) AS total FROM cobrancas c ${where}`,
+                valores
+            );
+            total = { total: parseInt(totalResultado.rows[0].total, 10), pagina: paginaAtual, por_pagina: limite };
+
+            valoresConsulta = [...valores, limite, offset];
+            limitOffsetSql = ` LIMIT $${valoresConsulta.length - 1} OFFSET $${valoresConsulta.length}`;
+        }
 
         const resultado = await client.query(
             `SELECT c.id, c.descricao, c.valor, c.vencimento, c.status, c.metodo,
@@ -40,8 +63,8 @@ router.get('/', autorizar('admin', 'diretoria'), async (req, res) => {
              JOIN associados a ON a.id = c.associado_id
              LEFT JOIN pagamentos p ON p.cobranca_id = c.id
              ${where}
-             ORDER BY c.vencimento DESC`,
-            valores
+             ORDER BY c.vencimento DESC${limitOffsetSql}`,
+            valoresConsulta
         );
 
         const configAssociacao = await client.query(
@@ -70,6 +93,9 @@ router.get('/', autorizar('admin', 'diretoria'), async (req, res) => {
             return { ...linha, status_exibicao: 'pendente', dias_restantes: diasRestantes };
         });
 
+        if (total) {
+            return res.json({ registros: linhas, total: total.total, pagina: total.pagina, por_pagina: total.por_pagina });
+        }
         res.json(linhas);
     } catch (err) {
         console.error(err);

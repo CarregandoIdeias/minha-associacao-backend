@@ -16,19 +16,49 @@ router.use(bloquearSenhaProvisoria);
 router.use(bloquearTrialExpirado);
 
 // GET /associados — lista os associados da associação do usuário logado (só admin/diretoria)
+//
+// Paginação é opt-in via ?pagina=/?por_pagina= -- sem esses parâmetros, o
+// comportamento é idêntico ao de sempre (array completo), porque o
+// Dashboard (KPIs, gráficos de 12 meses, "últimos associados") e a busca
+// instantânea da lista dependem hoje de ter o array inteiro no cliente
+// (associadosCache em painel/index.html). Adicionar LIMIT/OFFSET sem essa
+// distinção quebraria tudo isso -- a paginação de verdade na tela de
+// Associados (e mover a busca pro backend) é um passo futuro, separado.
 router.get('/', autorizar('admin', 'diretoria'), async (req, res) => {
+    const { pagina, por_pagina } = req.query;
     const client = await comConexaoTenant(req.usuario.associacao_id);
     try {
-        const resultado = await client.query(
-            `SELECT id, nome_completo, cpf, telefone, categoria, status, data_ingresso, observacao, criado_em,
+        const camposSelect = `id, nome_completo, cpf, telefone, categoria, status, data_ingresso, observacao, criado_em,
                     rg, endereco_cep, endereco_logradouro, endereco_numero, endereco_complemento,
-                    endereco_bairro, endereco_cidade, endereco_estado
-             FROM associados
-             WHERE associacao_id = $1
-             ORDER BY nome_completo`,
+                    endereco_bairro, endereco_cidade, endereco_estado`;
+
+        if (pagina == null && por_pagina == null) {
+            const resultado = await client.query(
+                `SELECT ${camposSelect} FROM associados WHERE associacao_id = $1 ORDER BY nome_completo`,
+                [req.usuario.associacao_id]
+            );
+            return res.json(resultado.rows);
+        }
+
+        const limite = Math.min(parseInt(por_pagina, 10) || 50, 200);
+        const paginaAtual = Math.max(parseInt(pagina, 10) || 1, 1);
+        const offset = (paginaAtual - 1) * limite;
+
+        const total = await client.query(
+            `SELECT COUNT(*) AS total FROM associados WHERE associacao_id = $1`,
             [req.usuario.associacao_id]
         );
-        res.json(resultado.rows);
+        const resultado = await client.query(
+            `SELECT ${camposSelect} FROM associados WHERE associacao_id = $1 ORDER BY nome_completo LIMIT $2 OFFSET $3`,
+            [req.usuario.associacao_id, limite, offset]
+        );
+
+        res.json({
+            registros: resultado.rows,
+            total: parseInt(total.rows[0].total, 10),
+            pagina: paginaAtual,
+            por_pagina: limite,
+        });
     } catch (err) {
         console.error(err);
         res.status(500).json({ erro: 'Erro ao listar associados' });
