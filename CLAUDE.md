@@ -645,6 +645,51 @@ Três pedidos separados do usuário no mesmo dia, todos só aditivos:
 
 **Gap real encontrado e corrigido de quebra**: `POST /comunicados/:id/marcar-lido` existia desde a Fase 3 (confirmação de leitura, item de sprint 3) mas **nunca tinha um consumidor no `portal.html`** — o associado nunca "marcava como lido" de fato, então o contador de não lidos nunca zeraria. Sem mudança de backend (a rota já existia e já funcionava pra qualquer papel autenticado); só o front passou a chamá-la ao abrir o mural.
 
+## Perfis de acesso granulares: Financeiro/Atendimento/Operador/Consulta (28/07/2026, item 5 do backlog de sugestões)
+
+Esse era o item do backlog mais arriscado dos 3 aplicados no dia — a
+seção "Reestruturação da sidebar" (25/07/2026) já tinha adiado isso de
+propósito, citando risco de mexer no enum + revisar toda chamada
+`autorizar()` do projeto. Antes de implementar, a matriz de permissões
+exata foi confirmada com o usuário (não assumida) — decisão de produto,
+não só técnica.
+
+`papel_usuario` ganhou 4 valores (migration
+`20260728100000_perfis_acesso_granulares.sql`, 4 `ALTER TYPE ... ADD
+VALUE` em instruções separadas — não dá pra combinar num único comando,
+e nenhuma delas pode ser usada na mesma transação em que foi adicionada,
+mas como são só isso no arquivo, sem uso junto, é seguro colar direto no
+SQL Editor). Matriz aplicada via `autorizar(...)` em cada rota, sem
+tocar em `admin`/`diretoria`/`associado`:
+
+| Perfil | Associados | Cobranças | Comunicados | Usuários/Config |
+|---|---|---|---|---|
+| Financeiro | ver | ver + criar/editar/pagar | ver | — |
+| Atendimento | ver + criar/editar | ver | ver + criar/editar/excluir | — |
+| Operador | ver + criar/editar | ver + criar/editar/pagar | ver + criar/editar/excluir | — |
+| Consulta | ver | ver | ver | — |
+
+`estornar`/`excluir` de cobrança e `excluir` de associado continuam
+**só admin** pros 4 perfis novos também — mesma restrição que já existia
+pra `diretoria`, estendida sem abrir exceção nova. Auditoria e atividades
+(feed do Dashboard) são "ver" pros 4, mesmo raciocínio de informação não
+sensível já usado pra `diretoria`.
+
+**Detalhe fácil de esquecer**: `GET /comunicados` (`routes/comunicados.js`)
+não tem `autorizar()` próprio — decide o comportamento internamente com
+uma variável `ehGestor` (`admin`/`diretoria` veem tudo com stats de
+leitura; qualquer outro papel vê só o que um associado veria, filtrado e
+com flag `lido`). Os 4 perfis novos precisaram entrar nessa lista
+também, senão um usuário `financeiro` legitimamente autorizado a ver
+comunicados enxergaria a versão errada (a de associado) em vez da
+gerencial.
+
+**Testado contra staging** com uma matriz de 22 combinações
+papel×rota/verbo (associação + 4 usuários de teste, um por perfil,
+criados e apagados via `comConexaoSuperAdmin()`) — GET liberado pros 4,
+POST/PUT/PATCH batendo o esperado (permitido onde a matriz diz, 403 onde
+não), Usuários/Configurações sempre 403. Todas passaram.
+
 ## Paginação opt-in em /associados e /cobrancas (28/07/2026, item 6 do backlog de sugestões)
 
 `GET /associados` e `GET /cobrancas` aceitam `?pagina=`/`?por_pagina=`
