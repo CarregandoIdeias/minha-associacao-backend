@@ -1257,4 +1257,47 @@ router.put('/configuracoes-plataforma', autorizarSuperAdmin('super_admin'), asyn
     }
 });
 
+// POST /superadmin/comunicados-plataforma — envia um comunicado pra todas as
+// associações ativas de uma vez (uma linha em `comunicados` por associação,
+// reaproveitando a tabela e o mural que já existe em cada tenant -- nenhuma
+// tela nova precisou ser criada em painel/index.html ou portal.html pra
+// exibir). `autor_id` fica null (super-admin não é um usuario de tenant);
+// `origem_plataforma = true` marca a origem, pra front mostrar "Comunicado
+// oficial" e bloquear editar/excluir por conta da diretoria (ver
+// routes/comunicados.js PUT/DELETE).
+router.post('/comunicados-plataforma', autorizarSuperAdmin(...GESTAO), async (req, res) => {
+    const { titulo, conteudo } = req.body;
+    if (!titulo || !conteudo) {
+        return res.status(400).json({ erro: 'titulo e conteudo são obrigatórios' });
+    }
+
+    const client = await comConexaoSuperAdmin();
+    try {
+        const associacoes = await client.query(`SELECT id FROM associacoes WHERE ativo = true`);
+
+        for (const associacao of associacoes.rows) {
+            await client.query(
+                `INSERT INTO comunicados (associacao_id, autor_id, titulo, conteudo, origem_plataforma)
+                 VALUES ($1, NULL, $2, $3, true)`,
+                [associacao.id, titulo, conteudo]
+            );
+        }
+
+        await registrarLogAuditoria(client, {
+            superAdminId: req.superAdmin.id, superAdminNome: req.superAdmin.nome, superAdminEmail: req.superAdmin.email,
+            modulo: 'comunicados', tipoAcao: 'criacao',
+            descricao: req.superAdmin.nome + ' enviou um comunicado da plataforma pra ' + associacoes.rows.length + ' associação(ões): "' + titulo + '"',
+            dadosNovos: { titulo, conteudo, total_associacoes: associacoes.rows.length },
+            req,
+        });
+
+        res.status(201).json({ ok: true, total_associacoes: associacoes.rows.length });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ erro: 'Erro ao enviar comunicado da plataforma' });
+    } finally {
+        client.release();
+    }
+});
+
 module.exports = router;

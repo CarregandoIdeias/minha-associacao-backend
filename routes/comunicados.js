@@ -45,7 +45,7 @@ router.get('/', async (req, res) => {
         const idxUsuario = valores.length;
 
         const resultado = await client.query(
-            `SELECT c.id, c.titulo, c.conteudo, c.categoria_alvo, c.publicado_em, c.status, c.destaque,
+            `SELECT c.id, c.titulo, c.conteudo, c.categoria_alvo, c.publicado_em, c.status, c.destaque, c.origem_plataforma,
                     u.nome AS autor_nome,
                     (cl.id IS NOT NULL) AS lido,
                     (SELECT COUNT(DISTINCT cl2.usuario_id)
@@ -122,11 +122,16 @@ router.put('/:id', autorizar('admin', 'diretoria'), async (req, res) => {
     const client = await comConexaoTenant(req.usuario.associacao_id);
     try {
         const anterior = await client.query(
-            `SELECT id, titulo, conteudo, categoria_alvo, publicado_em, status, destaque FROM comunicados WHERE id = $1 AND associacao_id = $2`,
+            `SELECT id, titulo, conteudo, categoria_alvo, publicado_em, status, destaque, origem_plataforma FROM comunicados WHERE id = $1 AND associacao_id = $2`,
             [id, req.usuario.associacao_id]
         );
         if (anterior.rows.length === 0) {
             return res.status(404).json({ erro: 'Comunicado não encontrado' });
+        }
+        // Comunicado enviado pelo Super Admin pra todas as associações --
+        // a diretoria não pode editar o texto oficial da plataforma.
+        if (anterior.rows[0].origem_plataforma) {
+            return res.status(403).json({ erro: 'Este é um comunicado oficial da plataforma e não pode ser editado' });
         }
 
         const resultado = await client.query(
@@ -157,6 +162,17 @@ router.delete('/:id', autorizar('admin', 'diretoria'), async (req, res) => {
     const { id } = req.params;
     const client = await comConexaoTenant(req.usuario.associacao_id);
     try {
+        const existente = await client.query(
+            `SELECT origem_plataforma FROM comunicados WHERE id = $1 AND associacao_id = $2`,
+            [id, req.usuario.associacao_id]
+        );
+        if (existente.rows.length === 0) {
+            return res.status(404).json({ erro: 'Comunicado não encontrado' });
+        }
+        if (existente.rows[0].origem_plataforma) {
+            return res.status(403).json({ erro: 'Este é um comunicado oficial da plataforma e não pode ser excluído' });
+        }
+
         const resultado = await client.query(
             `DELETE FROM comunicados WHERE id = $1 AND associacao_id = $2 RETURNING id, titulo`,
             [id, req.usuario.associacao_id]
