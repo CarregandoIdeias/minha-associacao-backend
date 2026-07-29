@@ -314,7 +314,7 @@ router.patch('/admins/:id/senha', autorizarSuperAdmin('super_admin'), async (req
 
     try {
         const resultado = await pool.query(
-            `UPDATE super_admins SET senha_hash = $1, deve_trocar_senha = true WHERE id = $2 RETURNING id, nome, email`,
+            `UPDATE super_admins SET senha_hash = $1, deve_trocar_senha = true, senha_alterada_em = now() WHERE id = $2 RETURNING id, nome, email`,
             [senhaHash, id]
         );
         if (resultado.rows.length === 0) {
@@ -359,7 +359,7 @@ router.put('/perfil/senha', async (req, res) => {
 
         const novoHash = await bcrypt.hash(senha_nova, 10);
         await pool.query(
-            `UPDATE super_admins SET senha_hash = $1, deve_trocar_senha = false WHERE id = $2`,
+            `UPDATE super_admins SET senha_hash = $1, deve_trocar_senha = false, senha_alterada_em = now() WHERE id = $2`,
             [novoHash, req.superAdmin.id]
         );
         await registrarLogAuditoria(pool, {
@@ -368,7 +368,16 @@ router.put('/perfil/senha', async (req, res) => {
             descricao: req.superAdmin.nome + ' alterou a própria senha', req,
         });
 
-        res.json({ ok: true });
+        // Reemite o token -- o antigo acabou de virar inválido (ver
+        // senha_alterada_em em middleware/auth.js), senão a própria pessoa
+        // ficaria "deslogada" na próxima ação sem nenhum aviso.
+        const novoToken = jwt.sign(
+            { id: req.superAdmin.id, email: req.superAdmin.email, tipo: 'superadmin' },
+            JWT_SECRET,
+            { expiresIn: '8h' }
+        );
+
+        res.json({ ok: true, token: novoToken });
     } catch (err) {
         console.error(err);
         res.status(500).json({ erro: 'Erro ao trocar senha' });
@@ -531,7 +540,7 @@ router.patch('/associacoes/:id/resetar-senha-admin', autorizarSuperAdmin(...GEST
     const client = await comConexaoSuperAdmin();
     try {
         const resultado = await client.query(
-            `UPDATE usuarios SET senha_hash = $1, deve_trocar_senha = true
+            `UPDATE usuarios SET senha_hash = $1, deve_trocar_senha = true, senha_alterada_em = now()
              WHERE associacao_id = $2 AND papel = 'admin'
              RETURNING id, email`,
             [senhaHash, id]

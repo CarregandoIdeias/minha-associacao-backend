@@ -133,6 +133,15 @@ router.post('/solicitar-contratacao', autorizar('admin'), async (req, res) => {
 
         res.status(201).json(resultado.rows[0]);
     } catch (err) {
+        // 23505 = unique_violation -- índice único parcial
+        // solicitacoes_plano_pendente_unica (migration 20260729020000) é a
+        // garantia de verdade contra a race condition de duas requisições
+        // simultâneas passarem os dois pelo SELECT acima antes de qualquer
+        // uma inserir; o SELECT continua existindo só como saída rápida no
+        // caso comum (evita a viagem extra ao banco na maioria das vezes).
+        if (err.code === '23505') {
+            return res.status(409).json({ erro: 'Já existe uma solicitação de contratação aguardando aprovação' });
+        }
         console.error(err);
         res.status(500).json({ erro: 'Erro ao enviar solicitação de contratação' });
     } finally {

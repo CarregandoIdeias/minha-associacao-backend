@@ -206,7 +206,7 @@ router.post('/redefinir-senha', limiteRedefinicao, async (req, res) => {
         }
 
         await client.query(
-            `UPDATE usuarios SET senha_hash = $1, deve_trocar_senha = false WHERE id = $2`,
+            `UPDATE usuarios SET senha_hash = $1, deve_trocar_senha = false, senha_alterada_em = now() WHERE id = $2`,
             [senhaHash, registro.usuario_id]
         );
         await client.query(`UPDATE password_resets SET usado = true WHERE id = $1`, [registro.id]);
@@ -279,7 +279,7 @@ router.put('/senha', autenticar, async (req, res) => {
         const clienteEscrita = await comConexaoTenant(req.usuario.associacao_id);
         try {
             await clienteEscrita.query(
-                `UPDATE usuarios SET senha_hash = $1, deve_trocar_senha = false WHERE id = $2`,
+                `UPDATE usuarios SET senha_hash = $1, deve_trocar_senha = false, senha_alterada_em = now() WHERE id = $2`,
                 [novoHash, req.usuario.id]
             );
 

@@ -3,6 +3,7 @@
 // mesma lista de linhas já filtrada/ordenada pela rota GET /superadmin/logs.
 const ExcelJS = require('exceljs');
 const PDFDocument = require('pdfkit');
+const { sanitizarCelulaExcel } = require('./validacao');
 
 const ROTULOS_TIPO_ACAO = {
     login: 'Login',
@@ -38,12 +39,12 @@ async function gerarExcelLogs(linhas) {
     linhas.forEach((linha) => {
         planilha.addRow({
             data: new Date(linha.criado_em).toLocaleString('pt-BR'),
-            usuario: nomeAtor(linha),
-            email: linha.usuario_email || linha.super_admin_email || '—',
-            associacao: linha.associacao_nome || '—',
+            usuario: sanitizarCelulaExcel(nomeAtor(linha)),
+            email: sanitizarCelulaExcel(linha.usuario_email || linha.super_admin_email || '—'),
+            associacao: sanitizarCelulaExcel(linha.associacao_nome || '—'),
             modulo: linha.modulo,
             tipo_acao: ROTULOS_TIPO_ACAO[linha.tipo_acao] || linha.tipo_acao,
-            descricao: linha.descricao,
+            descricao: sanitizarCelulaExcel(linha.descricao),
             ip: linha.ip || '—',
         });
     });

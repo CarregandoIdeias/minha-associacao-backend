@@ -11,6 +11,102 @@ associações — Super Admin cadastra associações-clientes, cada uma com seu
 admin/diretoria/associados isolados das outras. Front-end em
 `../painel` (HTML/JS puro, repositório separado), consome essa API.
 
+## Auditoria de segurança pré-lançamento — 5 achados médios corrigidos (29/07/2026)
+
+Pedido pelo usuário antes de disponibilizar a plataforma pra clientes reais:
+auditoria completa via 2 agentes em paralelo (backend + front-end), cobrindo
+as 3 integrações (Super Admin/Painel da Associação/Portal do Associado).
+Achados de severidade média, todos corrigidos e testados em staging:
+
+1. **IP forjável nos logs de auditoria/autenticação** — `utils/authLog.js`
+   e `utils/auditoria.js` extraíam o IP manualmente de
+   `req.headers['x-forwarded-for'].split(',')[0]`, exatamente a posição que
+   o próprio cliente controla livremente (proxies normalmente *acrescentam*
+   o IP real ao invés de sobrescrever, então um atacante mandando
+   `X-Forwarded-For: 1.2.3.4` fazia esse valor forjado virar o IP
+   registrado). Trocado por `req.ip`, que já respeita `app.set('trust
+   proxy', 1)` (`server.js`) — mesmo mecanismo que o `express-rate-limit`
+   já usa corretamente.
+
+2. **Formula injection no Excel exportado** — `utils/exportarLogs.js` e
+   `utils/exportarLeiturasComunicado.js` gravavam célula de texto livre
+   (nome, descrição, e-mail) sem neutralizar valores que começam com
+   `=`/`+`/`-`/`@`/tab — um `nome` ou `descricao` assim vira fórmula ativa
+   quando o Excel é aberto. Novo `sanitizarCelulaExcel()` em
+   `utils/validacao.js` prefixa com aspas simples (`'`) qualquer valor
+   nessas condições antes de `planilha.addRow(...)` — testado
+   isoladamente com `=HYPERLINK(...)`, `+1+1`, `-cmd|calc`, `@SUM(...)`.
+
+3. **`nome` de usuário sem validação** — `POST`/`PUT /usuarios`
+   (`routes/usuarios.js`) só exigiam "não vazio". Novo `nomeValido()` em
+   `utils/validacao.js` (máx. 120 caracteres, bloqueia caracteres de
+   controle) aplicado nos dois. Defesa em profundidade complementar ao
+   item 2 (a sanitização no export cobre qualquer campo de qualquer
+   tabela; essa validação fecha a entrada especificamente pro nome de
+   usuário, que é o campo mais citado em descrições de log de auditoria).
+
+4. **JWT não invalidado ao trocar senha** — um token roubado continuava
+   válido até expirar (até 8h) mesmo depois do dono trocar a senha por
+   suspeita de acesso indevido. Nova coluna `senha_alterada_em` em
+   `usuarios` e `super_admins` (migration
+   `20260729010000_senha_alterada_em.sql`, `DEFAULT now()` — **efeito
+   colateral esperado**: aplicar essa migration em produção invalida
+   todas as sessões abertas naquele instante, forçando um novo login;
+   aceitável, sem perda de dado). Toda rota que troca senha
+   (`PUT /auth/senha`, `POST /auth/redefinir-senha`,
+   `PATCH /usuarios/:id/redefinir-senha`, `PUT /superadmin/perfil/senha`,
+   `PATCH /superadmin/admins/:id/senha`,
+   `PATCH /superadmin/associacoes/:id/resetar-senha-admin`) agora grava
+   `senha_alterada_em = now()`. `autenticar()`/`autenticarSuperAdmin()`
+   (`middleware/auth.js`) comparam `payload.iat` (segundos, padrão do JWT)
+   com `senha_alterada_em` arredondado pro mesmo segundo
+   (`Math.floor(getTime()/1000)`) — **bug real encontrado e corrigido
+   durante o teste**: a primeira versão comparava `iat * 1000` (sempre
+   arredondado pra baixo, `:000ms`) direto contra o timestamp em
+   milissegundos do Postgres, o que rejeitava até o token **recém-emitido
+   na mesma resposta** quando as duas ações caíam no mesmo segundo (ex.:
+   `PUT /superadmin/perfil/senha` reemite token, mas ele vinha inválido de
+   cara). `PUT /superadmin/perfil/senha` não reemitia token nenhum antes
+   dessa correção — agora devolve `token` novo na resposta, e
+   `superadmin.html` foi atualizado pra salvar esse token
+   (senão o próprio Super Admin ficaria "deslogado" ao trocar a própria
+   senha, sem nenhum aviso).
+
+5. **Race condition em `POST /plano/solicitar-contratacao`** — o `SELECT`
+   de "já existe pendente" e o `INSERT` seguinte não eram atômicos; duas
+   requisições simultâneas passavam as duas pelo `SELECT` antes de
+   qualquer uma inserir, criando duas solicitações pendentes. Índice único
+   parcial `solicitacoes_plano_pendente_unica` (migration
+   `20260729020000_solicitacao_plano_indice_unico.sql`, `ON
+   solicitacoes_plano (associacao_id) WHERE status = 'pendente'`) garante
+   isso no próprio Postgres; a rota trata a violação (`err.code ===
+   '23505'`) com um 409 amigável. O `SELECT` antigo continua existindo só
+   como saída rápida no caso comum — a garantia real agora é o índice.
+   Testado disparando 2 requisições `curl` em paralelo de verdade (`&` +
+   `wait`) — confirmado só uma linha `pendente` no banco depois.
+
+**Todos os 5 testados em staging** com dados de teste criados e apagados
+via `comConexaoSuperAdmin()`/`pool` direto (associações e super-admins de
+teste, nunca produção). Nenhuma alteração em produção ainda — aguardando
+decisão do usuário sobre quando aplicar as duas migrations lá.
+
+**Itens de severidade baixa da mesma auditoria, NÃO corrigidos ainda**
+(ficaram de fora do escopo desta rodada, o usuário priorizou só os
+médios): upload de logo do Super Admin sem limite de tamanho como as
+outras rotas de imagem; log de auditoria duplicando a logo em base64
+inteira a cada edição de associação (mesmo sem tocar na logo); uma
+mensagem de erro em `painel/index.html` (`/atividades`) inserida via
+`innerHTML` sem escapar; `cidade`/`estado` não escapados no card
+"Últimas associações" do Dashboard do Super Admin (self-XSS apenas, só o
+próprio Super Admin escreve esse campo hoje); ~10 vulnerabilidades
+transitivas da cadeia do `exceljs` (`npm audit`, sem fix sem downgrade
+major). Também levantados nessa auditoria, fora do escopo de código:
+ausência de envio real de e-mail (esqueci-senha só orienta contatar o
+admin), ausência de política de privacidade/LGPD (a plataforma guarda
+CPF/RG/endereço/foto), e o texto da landing page sobre "backups
+automáticos diários"/"monitoramento contínuo" que não tem nenhuma
+ferramenta configurada por trás ainda.
+
 ## Gating de funcionalidades por plano (Fase 2 da melhoria de planos, 29/07/2026)
 
 Depois de renomear os planos (seção seguinte), implementado o gating de

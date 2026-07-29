@@ -15,9 +15,10 @@ async function registrarLogAuditoria(client, {
     dadosAnteriores, dadosNovos,
     req,
 }) {
-    const ip = req
-        ? (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket?.remoteAddress || null
-        : null;
+    // req.ip, não o header cru -- ver comentário equivalente em
+    // utils/authLog.js (mesmo raciocínio: X-Forwarded-For lido manualmente é
+    // forjável pelo próprio cliente, req.ip já resolve isso via trust proxy).
+    const ip = req ? (req.ip || req.socket?.remoteAddress || null) : null;
     const userAgent = req ? (req.headers['user-agent'] || null) : null;
 
     try {

@@ -53,7 +53,7 @@ async function autenticar(req, res, next) {
         const client = await comConexaoAuth();
         try {
             const resultado = await client.query(
-                `SELECT u.ativo, u.papel, u.nome, a.ativo AS associacao_ativa,
+                `SELECT u.ativo, u.papel, u.nome, u.senha_alterada_em, a.ativo AS associacao_ativa,
                         a.plano, a.trial_expira_em
                  FROM usuarios u
                  JOIN associacoes a ON a.id = u.associacao_id
@@ -62,6 +62,20 @@ async function autenticar(req, res, next) {
             );
             const usuario = resultado.rows[0];
             if (!usuario || !usuario.ativo || !usuario.associacao_ativa) {
+                return res.status(401).json({ erro: 'Token inválido ou expirado' });
+            }
+
+            // Token emitido ANTES da última troca de senha não vale mais --
+            // sem isso, um token roubado continuava válido até expirar (até
+            // 8h) mesmo depois do dono trocar a senha por suspeitar de
+            // acesso indevido. payload.iat vem em segundos inteiros (padrão
+            // do jwt), senha_alterada_em em milissegundos -- comparar os
+            // dois arredondados pro mesmo segundo (Math.floor do lado do
+            // timestamp) evita rejeitar o próprio token novo emitido no
+            // mesmo request que troca a senha, quando os dois caem no mesmo
+            // segundo (bug real encontrado testando: o token reemitido por
+            // PUT /auth/senha/PUT /superadmin/perfil/senha vinha inválido).
+            if (usuario.senha_alterada_em && payload.iat < Math.floor(new Date(usuario.senha_alterada_em).getTime() / 1000)) {
                 return res.status(401).json({ erro: 'Token inválido ou expirado' });
             }
 
@@ -217,13 +231,21 @@ async function autenticarSuperAdmin(req, res, next) {
     for (let tentativa = 1; tentativa <= MAX_TENTATIVAS; tentativa++) {
         try {
             const resultado = await pool.query(
-                `SELECT nome, papel, ativo, deve_trocar_senha FROM super_admins WHERE id = $1`,
+                `SELECT nome, papel, ativo, deve_trocar_senha, senha_alterada_em FROM super_admins WHERE id = $1`,
                 [payload.id]
             );
             const admin = resultado.rows[0];
             if (!admin || !admin.ativo) {
                 return res.status(401).json({ erro: 'Token inválido ou expirado' });
             }
+
+            // Mesmo raciocínio (e mesmo cuidado de arredondamento) de
+            // autenticar() acima: token emitido antes da última troca de
+            // senha não vale mais.
+            if (admin.senha_alterada_em && payload.iat < Math.floor(new Date(admin.senha_alterada_em).getTime() / 1000)) {
+                return res.status(401).json({ erro: 'Token inválido ou expirado' });
+            }
+
             // { id, email, tipo, papel, nome } -- papel/nome vêm frescos do banco,
             // não do token, para uma troca de nível de permissão valer na hora.
             req.superAdmin = { ...payload, papel: admin.papel, nome: admin.nome };

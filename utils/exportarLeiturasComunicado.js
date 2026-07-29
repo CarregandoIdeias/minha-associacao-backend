@@ -4,6 +4,7 @@
 // utils/exportarLogs.js (exceljs/pdfkit), lista já vem pronta da rota.
 const ExcelJS = require('exceljs');
 const PDFDocument = require('pdfkit');
+const { sanitizarCelulaExcel } = require('./validacao');
 
 async function gerarExcelLeituras(tituloComunicado, linhas) {
     const workbook = new ExcelJS.Workbook();
@@ -19,8 +20,8 @@ async function gerarExcelLeituras(tituloComunicado, linhas) {
 
     linhas.forEach((linha) => {
         planilha.addRow({
-            nome: linha.nome,
-            email: linha.email,
+            nome: sanitizarCelulaExcel(linha.nome),
+            email: sanitizarCelulaExcel(linha.email),
             status: linha.lido ? 'Lido' : 'Não lido',
             data: linha.lido_em ? new Date(linha.lido_em).toLocaleString('pt-BR') : '—',
         });

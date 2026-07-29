@@ -35,6 +35,37 @@ function emailValido(email) {
     return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 }
 
+// Valida nome de usuário/pessoa (achado na auditoria de 29/07/2026: o nome
+// de usuário não tinha validação nenhuma além de "não vazio", e esse valor
+// vira `usuario_nome`/descrição em logs_auditoria e atividades -- dava pra
+// cadastrar um usuário com um nome tipo frase inteira, se passando por outra
+// ação no histórico de auditoria). Bloqueia caracteres de controle e o
+// mesmo alfabeto que sanitizarCelulaExcel() neutraliza (defesa em
+// profundidade -- essa validação barra na entrada, aquela protege na saída
+// pra qualquer outro campo de texto livre que acabe exportado).
+function nomeValido(nome) {
+    if (!nome || typeof nome !== 'string') return false;
+    const limpo = nome.trim();
+    if (limpo.length < 1 || limpo.length > 120) return false;
+    if (/[\x00-\x1F\x7F]/.test(limpo)) return false;
+    return true;
+}
+
+// Neutraliza formula injection em planilhas Excel (achado na auditoria de
+// 29/07/2026): uma célula cujo texto começa com =, +, -, @ ou tab é
+// interpretada como fórmula por padrão pelo Excel/LibreOffice ao abrir o
+// arquivo -- se esse texto vier de um campo de usuário (nome, descrição,
+// título de comunicado), um `atendimento`/`operador` malicioso pode
+// injetar algo como "=HYPERLINK(...)" que executa quando o admin/Super
+// Admin abre a planilha exportada. Prefixar com aspas simples faz o
+// Excel tratar como texto literal, sem mudar o que aparece pro usuário.
+function sanitizarCelulaExcel(valor) {
+    if (valor === null || valor === undefined) return valor;
+    const texto = String(valor);
+    if (/^[=+\-@\t\r]/.test(texto)) return "'" + texto;
+    return texto;
+}
+
 // Valida um data URL base64 de ponta a ponta (não só o prefixo).
 //
 // IMPORTANTE -- essa validação é de SEGURANÇA, não só de formato. Antes existia
@@ -117,6 +148,8 @@ function gerarSenhaProvisoria() {
 module.exports = {
     cpfValido,
     emailValido,
+    nomeValido,
+    sanitizarCelulaExcel,
     senhaForte,
     gerarSenhaProvisoria,
     imagemBase64Valida,

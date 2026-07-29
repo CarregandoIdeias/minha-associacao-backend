@@ -3,7 +3,7 @@ const express = require('express');
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 const { autenticar, bloquearSenhaProvisoria, bloquearTrialExpirado, autorizar, comConexaoTenant } = require('../middleware/auth');
-const { emailValido, gerarSenhaProvisoria } = require('../utils/validacao');
+const { emailValido, nomeValido, gerarSenhaProvisoria } = require('../utils/validacao');
 const { planoAtendeNivel } = require('../utils/precos');
 
 // Perfis de acesso granulares (item 5 do backlog, 28/07/2026) são
@@ -54,6 +54,9 @@ router.post('/', autorizar('admin'), async (req, res) => {
     if (!nome || !email || !papel) {
         return res.status(400).json({ erro: 'nome, email e papel são obrigatórios' });
     }
+    if (!nomeValido(nome)) {
+        return res.status(400).json({ erro: 'nome inválido (máximo 120 caracteres, sem caracteres de controle)' });
+    }
     if (!emailValido(email)) {
         return res.status(400).json({ erro: 'e-mail inválido' });
     }
@@ -84,7 +87,7 @@ router.post('/', autorizar('admin'), async (req, res) => {
             `INSERT INTO usuarios (associacao_id, nome, email, senha_hash, papel, deve_trocar_senha)
              VALUES ($1, $2, $3, $4, $5, true)
              RETURNING id, nome, email, papel, ativo, criado_em`,
-            [req.usuario.associacao_id, nome, email, senhaHash, papel]
+            [req.usuario.associacao_id, nome.trim(), email, senhaHash, papel]
         );
         const novoUsuario = resultado.rows[0];
 
@@ -283,7 +286,7 @@ router.patch('/:id/redefinir-senha', autorizar('admin'), async (req, res) => {
     const client = await comConexaoTenant(req.usuario.associacao_id);
     try {
         const resultado = await client.query(
-            `UPDATE usuarios SET senha_hash = $1, deve_trocar_senha = true
+            `UPDATE usuarios SET senha_hash = $1, deve_trocar_senha = true, senha_alterada_em = now()
              WHERE id = $2 AND associacao_id = $3 RETURNING id, nome, email`,
             [senhaHash, id, req.usuario.associacao_id]
         );
@@ -312,6 +315,9 @@ router.put('/:id', autorizar('admin'), async (req, res) => {
 
     if (!nome || !nome.trim()) {
         return res.status(400).json({ erro: 'nome é obrigatório' });
+    }
+    if (!nomeValido(nome)) {
+        return res.status(400).json({ erro: 'nome inválido (máximo 120 caracteres, sem caracteres de controle)' });
     }
     if (papel && !['admin', 'diretoria', 'financeiro', 'atendimento', 'operador', 'consulta', 'associado'].includes(papel)) {
         return res.status(400).json({ erro: 'papel inválido' });
