@@ -9,7 +9,10 @@ const express = require('express');
 const { autenticar, bloquearSenhaProvisoria, autorizar, comConexaoTenant } = require('../middleware/auth');
 const { registrarLogAuditoria } = require('../utils/auditoria');
 const { comprovanteBase64Valido } = require('../utils/validacao');
-const { calcularValorMensalidade, statusAssinatura, alertaAssinatura, LIMITE_ASSOCIADOS_PLANO } = require('../utils/precos');
+const {
+    calcularValorMensalidade, statusAssinatura, alertaAssinatura, LIMITE_ASSOCIADOS_PLANO,
+    PROXIMO_PLANO, alertaLimiteAssociados, planosGerenciaveis, planoMinimoParaComportar,
+} = require('../utils/precos');
 
 const router = express.Router();
 router.use(autenticar);
@@ -63,11 +66,27 @@ router.get('/', autorizar('admin', 'diretoria'), async (req, res) => {
             [req.usuario.associacao_id]
         );
 
-        // Limite de associados é só informativo (upsell) -- nunca bloqueia
-        // o cadastro, ver POST /associados (sem checagem de teto lá de
-        // propósito). "Perto do limite" = 90% ou mais da faixa do plano.
+        // Controle de limite de associados (item 2, 30/07/2026) -- desde
+        // essa data o cadastro É bloqueado ao atingir 100% (ver POST
+        // /associados, routes/associados.js), decisão de produto confirmada
+        // com o usuário (reverte o "só avisa" documentado antes disso).
+        // "Perto do limite" (perto_do_limite, >=90%) é mantido por
+        // compatibilidade com quem já consumia esse campo; alerta_limite
+        // abaixo é a versão nova, com as 3 faixas (80/90/100%).
         const limiteAssociados = LIMITE_ASSOCIADOS_PLANO[a.plano] != null ? LIMITE_ASSOCIADOS_PLANO[a.plano] : null;
         const pertoDoLimite = limiteAssociados != null && total >= limiteAssociados * 0.9;
+        const alertaLimite = alertaLimiteAssociados(a.plano, total);
+
+        // Renovação inteligente (item 6): só preenchido quando o total atual
+        // já não cabe mais no plano contratado -- normalmente não deveria
+        // acontecer com o bloqueio de cadastro ativo, mas cobre o caso de o
+        // Super Admin ter reduzido o plano manualmente com a associação já
+        // maior que o novo teto.
+        let planoRenovacaoSugerido = null;
+        if (limiteAssociados != null && total > limiteAssociados) {
+            const sugestao = planoMinimoParaComportar(total);
+            if (sugestao !== a.plano) planoRenovacaoSugerido = sugestao;
+        }
 
         res.json({
             nome_associacao: a.nome,
@@ -80,6 +99,10 @@ router.get('/', autorizar('admin', 'diretoria'), async (req, res) => {
             total_associados: total,
             limite_associados: limiteAssociados,
             perto_do_limite: pertoDoLimite,
+            alerta_limite: alertaLimite,
+            proximo_plano: PROXIMO_PLANO[a.plano] || null,
+            planos_gerenciaveis: planosGerenciaveis(a.plano),
+            plano_renovacao_sugerido: planoRenovacaoSugerido,
             status: statusAssinatura(a),
             alerta: alertaAssinatura(a),
             pix_plataforma: pixPlataforma.rows[0] || { chave_pix: null, nome_recebedor_pix: null, cidade_pix: null },

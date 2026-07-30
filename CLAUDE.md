@@ -11,6 +11,65 @@ associações — Super Admin cadastra associações-clientes, cada uma com seu
 admin/diretoria/associados isolados das outras. Front-end em
 `../painel` (HTML/JS puro, repositório separado), consome essa API.
 
+## Controle inteligente de limite de associados + sugestão de upgrade (30/07/2026)
+
+Pedido grande do usuário (9 itens numerados) que **reverte uma decisão de
+produto já documentada**: até aqui, `LIMITE_ASSOCIADOS_PLANO` era só
+informativo, `POST /associados` nunca bloqueava (comentário antigo dizia
+isso explicitamente). Antes de implementar, 3 pontos de conflito com a
+spec original foram confirmados com o usuário (não assumidos):
+
+1. **Bloqueio de cadastro: confirmado que sim, bloqueia de verdade agora.**
+2. **Ativação de upgrade continua manual** (Pix + comprovante + aprovação
+   do Super Admin, fluxo já existente) — a spec pedia "atualizar
+   imediatamente os limites ao confirmar o upgrade", mas isso já é
+   exatamente o que `PATCH /superadmin/solicitacoes-plano/:id/aprovar`
+   faz desde 26/07 (atualiza `plano`+`vencimento_assinatura` e já grava
+   log de auditoria) — não precisou de nada novo, só o front reaproveitar
+   esse fluxo com contexto (pré-seleção de plano).
+3. **"Renovação" não é um processo novo** — reaproveita a mesma
+   contratação de sempre, só pré-selecionando o plano (atual ou sugerido).
+
+**`utils/precos.js`** ganhou 4 funções novas:
+- `alertaLimiteAssociados(plano, total)` — 3 faixas (80%/90%/100%),
+  espelha `alertaAssinatura()` já existente (mesmo formato
+  `{nivel, ...}`), mas para uso de capacidade em vez de vencimento.
+  `null` quando plano sem teto (trial/avançado) ou uso < 80%.
+- `planosGerenciaveis(planoAtual)` — quais planos aparecem no modal
+  "Gerenciar Plano": trial/básico mostram os 3, intermediário só mostra
+  avançado, avançado não mostra nenhum (front usa isso pra saber quando
+  esconder a grade de escolha e ir direto pro pagamento). **Nunca inclui
+  downgrade** — regra de negócio explícita: downgrade só pelo Super Admin,
+  manual, depois de validar que a quantidade de associados cabe no plano
+  menor (não implementado — não foi pedido nessa rodada).
+- `planoMinimoParaComportar(totalAssociados)` — menor plano pago cujo
+  teto comporta esse total (usado na renovação inteligente).
+- `PROXIMO_PLANO` (objeto/mapa) — sugestão de upgrade de 1 nível
+  (básico→intermediário→avançado), usado na mensagem "recomendamos migrar
+  para o Plano X".
+
+**`GET /plano`** (`routes/plano.js`) ganhou `alerta_limite`,
+`proximo_plano`, `planos_gerenciaveis` e `plano_renovacao_sugerido` (só
+preenchido quando `total_associados` já não cabe mais no plano atual —
+normalmente não deveria acontecer com o bloqueio ativo, mas cobre o caso
+do Super Admin reduzir o plano manualmente com a associação já maior que
+o novo teto). Campos antigos (`limite_associados`, `perto_do_limite`)
+mantidos como estavam, por compatibilidade.
+
+**`POST /associados`** (`routes/associados.js`) ganhou a checagem de
+limite antes de gerar a senha provisória (falha rápido) — 403 com
+`codigo: 'LIMITE_ASSOCIADOS_ATINGIDO'` quando `total >= limite` do plano
+atual. `PUT /associados/:id` (edição) não foi tocado, só criação conta
+pro limite.
+
+**Testado em staging**: associação de teste no plano Básico (limite 50),
+populada com associados fake via `pool.connect()` direto até 40 (80%,
+confirmado nível `atencao`), 45 (90%, `alerta`, "restam 5 vagas"), 50
+(100%, `critico`, e `POST /associados` de fato devolveu 403), depois
+trocado pra Avançado (sem teto, `POST` liberado, 201 confirmado) e de
+volta pra Básico com 51 associados (`plano_renovacao_sugerido:
+'intermediario'` confirmado). Dados de teste removidos ao final.
+
 ## Modal de boas-vindas no primeiro acesso (admin e associado, 30/07/2026)
 
 Pedido do usuário depois de ver o painel funcionando: mostrar um modal só

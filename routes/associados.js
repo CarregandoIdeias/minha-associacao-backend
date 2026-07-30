@@ -7,6 +7,7 @@ const { cpfValido, emailValido, gerarSenhaProvisoria } = require('../utils/valid
 const { registrarEventoAuth } = require('../utils/authLog');
 const { registrarAtividade } = require('../utils/atividadeLog');
 const { registrarLogAuditoria } = require('../utils/auditoria');
+const { LIMITE_ASSOCIADOS_PLANO } = require('../utils/precos');
 
 const router = express.Router();
 
@@ -84,6 +85,33 @@ router.post('/', autorizar('admin', 'diretoria', 'atendimento', 'operador'), asy
     }
     if (!email || !emailValido(email)) {
         return res.status(400).json({ erro: 'e-mail válido é obrigatório' });
+    }
+
+    // Bloqueio de novos cadastros ao atingir o limite do plano (item 7,
+    // 30/07/2026) -- decisão de produto confirmada com o usuário, reverte o
+    // "nunca bloqueia" documentado antes disso (ver GET /plano). Checado
+    // antes de gerar senha/hash pra falhar rápido; usa uma conexão à parte,
+    // liberada logo em seguida, mesmo raciocínio de não segurar conexão
+    // durante o bcrypt (comentário abaixo).
+    const limiteAssociados = LIMITE_ASSOCIADOS_PLANO[req.usuario.plano];
+    if (limiteAssociados != null) {
+        const clienteChecagem = await comConexaoTenant(req.usuario.associacao_id);
+        let totalAtual;
+        try {
+            const contagem = await clienteChecagem.query(
+                `SELECT COUNT(*) AS total FROM associados WHERE associacao_id = $1`,
+                [req.usuario.associacao_id]
+            );
+            totalAtual = parseInt(contagem.rows[0].total, 10);
+        } finally {
+            clienteChecagem.release();
+        }
+        if (totalAtual >= limiteAssociados) {
+            return res.status(403).json({
+                erro: 'Você atingiu o limite de associados do seu plano. Faça o upgrade para continuar cadastrando novos associados.',
+                codigo: 'LIMITE_ASSOCIADOS_ATINGIDO',
+            });
+        }
     }
 
     // Gerado/hasheado antes de pegar a conexão -- bcrypt é deliberadamente

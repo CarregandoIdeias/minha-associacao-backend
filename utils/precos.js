@@ -99,12 +99,86 @@ function alertaAssinatura(associacao, hoje) {
     return { tipo: 'assinatura', dias_restantes: diasRestantes, nivel: nivel };
 }
 
+// Próximo plano pago sugerido a partir do atual -- usado na sugestão
+// automática de upgrade (item 3, 30/07/2026). trial não entra aqui porque
+// não tem "próximo" único: ao esgotar o trial a associação escolhe
+// livremente entre os 3 (ver GET /plano -> planos_gerenciaveis).
+const PROXIMO_PLANO = { trial: null, basico: 'intermediario', intermediario: 'avancado', avancado: null };
+
+// Ordem dos planos pagos, usada por planoMinimoParaComportar abaixo.
+const ORDEM_PLANOS_PAGOS = ['basico', 'intermediario', 'avancado'];
+
+// Alerta de uso do limite de associados, por faixa (item 2, 30/07/2026):
+// 80% = aviso discreto, 90% = atenção com vagas restantes, 100% = crítico.
+// null quando o plano não tem teto (trial/avançado) ou uso < 80%.
+function alertaLimiteAssociados(plano, totalAssociados) {
+    const limite = LIMITE_ASSOCIADOS_PLANO[plano];
+    if (limite == null || limite <= 0) return null;
+
+    const percentual = Math.round((totalAssociados / limite) * 100);
+    if (percentual < 80) return null;
+
+    const vagasRestantes = Math.max(0, limite - totalAssociados);
+
+    if (percentual >= 100) {
+        return {
+            nivel: 'critico',
+            percentual: percentual,
+            vagas_restantes: vagasRestantes,
+            mensagem: 'Você atingiu o limite de associados permitido pelo seu plano.',
+        };
+    }
+    if (percentual >= 90) {
+        return {
+            nivel: 'alerta',
+            percentual: percentual,
+            vagas_restantes: vagasRestantes,
+            mensagem: 'Atenção! Restam apenas ' + vagasRestantes + (vagasRestantes === 1 ? ' vaga' : ' vagas') + ' para novos associados.',
+        };
+    }
+    return {
+        nivel: 'atencao',
+        percentual: percentual,
+        vagas_restantes: vagasRestantes,
+        mensagem: 'Você já utilizou ' + percentual + '% da capacidade do seu plano.',
+    };
+}
+
+// Quais planos aparecem no modal "Gerenciar Plano" (item 4, 30/07/2026) --
+// nunca oferece downgrade pelo cliente (regra de negócio: downgrade só pelo
+// Super Admin, depois de validar que a quantidade de associados é
+// compatível). trial e básico mostram os 3 (básico ainda pode "ficar" nele
+// mesmo, não é downgrade); intermediário só mostra avançado; avançado não
+// tem opção nenhuma (front mostra "Pagar Plano" nesse caso, sem escolha).
+function planosGerenciaveis(planoAtual) {
+    if (planoAtual === 'trial' || planoAtual === 'basico') return ['basico', 'intermediario', 'avancado'];
+    if (planoAtual === 'intermediario') return ['avancado'];
+    return [];
+}
+
+// Menor plano pago que comporta a quantidade atual de associados (item 6,
+// renovação inteligente) -- usado quando a associação cresceu além do
+// limite do plano atual e precisa saber pra qual plano a renovação deve
+// migrar. Sempre devolve algum plano (avançado nunca tem teto).
+function planoMinimoParaComportar(totalAssociados) {
+    for (let i = 0; i < ORDEM_PLANOS_PAGOS.length; i++) {
+        const plano = ORDEM_PLANOS_PAGOS[i];
+        const limite = LIMITE_ASSOCIADOS_PLANO[plano];
+        if (limite == null || totalAssociados <= limite) return plano;
+    }
+    return 'avancado';
+}
+
 module.exports = {
     PRECOS_PLANO,
     LIMITE_ASSOCIADOS_PLANO,
     NIVEL_PLANO,
+    PROXIMO_PLANO,
     planoAtendeNivel,
     calcularValorMensalidade,
     statusAssinatura,
     alertaAssinatura,
+    alertaLimiteAssociados,
+    planosGerenciaveis,
+    planoMinimoParaComportar,
 };
