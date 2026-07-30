@@ -1,34 +1,11 @@
 // utils/exportarLeiturasComunicado.js
-// Gera os arquivos de exportação da lista de leitura de um comunicado
-// (item de sprint 3, "Confirmação de Leitura") -- mesmo padrão de
-// utils/exportarLogs.js (exceljs/pdfkit), lista já vem pronta da rota.
-const ExcelJS = require('exceljs');
+// Gera o PDF de exportação da lista de leitura de um comunicado (item de
+// sprint 3, "Confirmação de Leitura") -- lista já vem pronta da rota.
+//
+// Exportação em Excel removida em 29/07/2026 -- ver comentário equivalente
+// em utils/exportarLogs.js (nenhuma versão do exceljs escapa das
+// vulnerabilidades transitivas do `archiver`).
 const PDFDocument = require('pdfkit');
-const { sanitizarCelulaExcel } = require('./validacao');
-
-async function gerarExcelLeituras(tituloComunicado, linhas) {
-    const workbook = new ExcelJS.Workbook();
-    const planilha = workbook.addWorksheet('Leituras');
-
-    planilha.columns = [
-        { header: 'Associado', key: 'nome', width: 30 },
-        { header: 'E-mail', key: 'email', width: 32 },
-        { header: 'Status', key: 'status', width: 14 },
-        { header: 'Data da leitura', key: 'data', width: 20 },
-    ];
-    planilha.getRow(1).font = { bold: true };
-
-    linhas.forEach((linha) => {
-        planilha.addRow({
-            nome: sanitizarCelulaExcel(linha.nome),
-            email: sanitizarCelulaExcel(linha.email),
-            status: linha.lido ? 'Lido' : 'Não lido',
-            data: linha.lido_em ? new Date(linha.lido_em).toLocaleString('pt-BR') : '—',
-        });
-    });
-
-    return workbook.xlsx.writeBuffer();
-}
 
 // pdfkit não tem suporte nativo a tabelas -- desenha manualmente, mesmo
 // padrão de utils/exportarLogs.js.
@@ -93,4 +70,4 @@ function gerarPdfLeituras(tituloComunicado, linhas) {
     });
 }
 
-module.exports = { gerarExcelLeituras, gerarPdfLeituras };
+module.exports = { gerarPdfLeituras };

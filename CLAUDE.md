@@ -11,6 +11,71 @@ associações — Super Admin cadastra associações-clientes, cada uma com seu
 admin/diretoria/associados isolados das outras. Front-end em
 `../painel` (HTML/JS puro, repositório separado), consome essa API.
 
+## Auditoria de segurança pré-lançamento — itens de severidade baixa corrigidos (29/07/2026, continuação)
+
+Depois dos 5 médios (seção seguinte), o usuário pediu pra resolver também
+os de severidade baixa da mesma auditoria:
+
+**Exportação Excel removida, só PDF continua** — o maior dos itens.
+`npm audit` reportava 10 vulnerabilidades (9 high, 1 moderate) na cadeia
+transitiva do `exceljs` (via `archiver`: glob/minimatch/brace-expansion/
+rimraf/uuid/zip-stream). Testado trocar de versão antes de decidir remover
+— **nenhuma versão do exceljs escapa disso**: `^4.4.0` (o que já estava
+instalado) mostrava `exceljs >=3.5.0` vulnerável com fix sugerido 3.4.0;
+instalando 3.4.0, o próprio `npm audit` reavaliava e reportava 3.4.0
+também vulnerável (`range: 0.1.10 - 4.1.1`) com fix sugerido 3.10.0;
+instalando 3.10.0, voltava a reportar `exceljs` vulnerável com `range:
+>=0.1.10` (ou seja, **toda versão já publicada**) e fix sugerido 3.4.0 de
+novo — um loop sem saída real, porque a vulnerabilidade está no
+`archiver` que o exceljs usa pra montar o `.xlsx` como zip, não no
+exceljs em si. A pedido do usuário ("se for caso remova exportações em
+excel, deixa apenas pdf"), `exceljs` foi removido do `package.json`
+(`npm uninstall exceljs` — **`npm audit` foi de 10 pra 0 vulnerabilidades**
+na hora). `pdfkit` (única lib de exportação que sobrou) não tem essa
+cadeia de dependências.
+
+Mudança em cascata, sempre removendo o branch `formato === 'excel'` e
+simplificando a assinatura da função (não fazia sentido manter um
+parâmetro `formato` que só um valor possível continua existindo):
+- `utils/exportarLogs.js`: `gerarExcelLogs` removida, só `gerarPdfLogs`
+  exportada.
+- `utils/exportarLeiturasComunicado.js`: `gerarExcelLeituras` removida,
+  só `gerarPdfLeituras` exportada.
+- `utils/validacao.js`: `sanitizarCelulaExcel()` (criada horas antes,
+  pro item de formula injection) virou órfã e foi removida também --
+  só existia pra sanitizar célula de Excel, não faz sentido mais.
+- `routes/auditoria.js`, `routes/superadmin.js` (`/logs/exportar/:formato`),
+  `routes/comunicados.js` (`/leituras/exportar/:formato`): validação de
+  `formato` mudou de `['excel','pdf'].includes(...)` pra
+  `formato !== 'pdf'`, removido o branch condicional que chamava a
+  função de Excel.
+- Front-end (`painel/CLAUDE.md` tem o detalhe): removidos os 3 botões
+  "Exportar Excel" (`superadmin.html`, `index.html` × 2 — auditoria e
+  leituras de comunicado) e simplificadas as 3 funções JS correspondentes
+  pra não receberem mais parâmetro de formato.
+
+Testado em staging: as 3 rotas (`/superadmin/logs/exportar/pdf`,
+`/auditoria/exportar/pdf`, `/comunicados/:id/leituras/exportar/pdf`)
+geram PDF válido (`file` confirmou `PDF document`); as 3 mesmas rotas
+com `/excel` no lugar de `/pdf` devolvem 400 `formato deve ser "pdf"`
+corretamente.
+
+**Outros 4 itens de severidade baixa, também corrigidos:**
+- IP forjável já estava coberto pelo fix de `req.ip` da seção anterior
+  (mesma correção serviu pros dois).
+- Limite de tamanho (~2MB) aplicado em `logo_base64` nas duas rotas de
+  associação do Super Admin (`POST`/`PUT /superadmin/associacoes`) --
+  mesmo padrão que `PUT /configuracoes/logo` já tinha, só essas duas
+  rotas tinham ficado de fora.
+- Log de auditoria não grava mais `logo_url` (base64 inteira, pode ter
+  MBs) em `dados_novos` a cada edição de associação --
+  `PUT /superadmin/associacoes/:id` agora exclui esse campo do objeto
+  antes de chamar `registrarLogAuditoria` (`const { logo_url,
+  ...dadosNovosSemLogo }`). A rota de criação já fazia isso certo desde
+  sempre (usava um objeto curado, não o `RETURNING` completo).
+- `nome` de usuário e o IP forjável eram os mesmos dos médios, não
+  duplicados aqui.
+
 ## Auditoria de segurança pré-lançamento — 5 achados médios corrigidos (29/07/2026)
 
 Pedido pelo usuário antes de disponibilizar a plataforma pra clientes reais:

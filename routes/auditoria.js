@@ -8,7 +8,7 @@
 const express = require('express');
 const { autenticar, bloquearSenhaProvisoria, bloquearTrialExpirado, exigirPlano, autorizar, comConexaoTenant } = require('../middleware/auth');
 const { registrarLogAuditoria } = require('../utils/auditoria');
-const { gerarExcelLogs, gerarPdfLogs } = require('../utils/exportarLogs');
+const { gerarPdfLogs } = require('../utils/exportarLogs');
 
 const router = express.Router();
 router.use(autenticar);
@@ -93,8 +93,8 @@ router.get('/', autorizar('admin', 'diretoria', 'financeiro', 'atendimento', 'op
 // gate de plano Avançado da listagem acima.
 router.get('/exportar/:formato', autorizar('admin', 'diretoria', 'financeiro', 'atendimento', 'operador', 'consulta'), exigirPlano('avancado'), async (req, res) => {
     const { formato } = req.params;
-    if (!['excel', 'pdf'].includes(formato)) {
-        return res.status(400).json({ erro: 'formato deve ser "excel" ou "pdf"' });
+    if (formato !== 'pdf') {
+        return res.status(400).json({ erro: 'formato deve ser "pdf"' });
     }
 
     const client = await comConexaoTenant(req.usuario.associacao_id);
@@ -117,13 +117,6 @@ router.get('/exportar/:formato', autorizar('admin', 'diretoria', 'financeiro', '
             descricao: req.usuario.nome + ' exportou os logs de auditoria em ' + formato.toUpperCase() + ' (' + resultado.rows.length + ' linhas)',
             req,
         });
-
-        if (formato === 'excel') {
-            const buffer = await gerarExcelLogs(resultado.rows);
-            res.set('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-            res.set('Content-Disposition', 'attachment; filename="auditoria.xlsx"');
-            return res.send(Buffer.from(buffer));
-        }
 
         const buffer = await gerarPdfLogs(resultado.rows);
         res.set('Content-Type', 'application/pdf');

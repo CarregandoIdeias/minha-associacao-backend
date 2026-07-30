@@ -1,9 +1,19 @@
 // utils/exportarLogs.js
-// Gera os arquivos de exportação da tela de Auditoria (Excel/PDF) a partir da
-// mesma lista de linhas já filtrada/ordenada pela rota GET /superadmin/logs.
-const ExcelJS = require('exceljs');
+// Gera o PDF de exportação da tela de Auditoria a partir da mesma lista de
+// linhas já filtrada/ordenada pela rota GET /superadmin/logs.
+//
+// Exportação em Excel (exceljs) foi removida em 29/07/2026, achado na
+// auditoria de segurança pré-lançamento: TODA versão publicada do exceljs
+// depende, direta ou indiretamente, do pacote `archiver` (usado pra montar
+// o .xlsx como zip), cuja árvore de dependências (glob/minimatch/
+// brace-expansion/rimraf/uuid/zip-stream) carrega ~10 vulnerabilidades
+// (9 high, 1 moderate) sem nenhuma versão do exceljs que escape disso --
+// testado trocando entre 4.4.0/3.10.0/3.4.0, `npm audit` sempre reportava
+// exceljs como vulnerável de novo, só mudando o range. Decisão do usuário:
+// já que só o Excel dependia do exceljs, manter só a exportação em PDF
+// (pdfkit, sem essa cadeia de dependências, `npm audit` limpo) em vez de
+// arriscar um downgrade que não resolve o problema de verdade.
 const PDFDocument = require('pdfkit');
-const { sanitizarCelulaExcel } = require('./validacao');
 
 const ROTULOS_TIPO_ACAO = {
     login: 'Login',
@@ -18,38 +28,6 @@ const ROTULOS_TIPO_ACAO = {
 
 function nomeAtor(linha) {
     return linha.super_admin_nome || linha.usuario_nome || linha.usuario_email || linha.super_admin_email || '—';
-}
-
-async function gerarExcelLogs(linhas) {
-    const workbook = new ExcelJS.Workbook();
-    const planilha = workbook.addWorksheet('Logs de auditoria');
-
-    planilha.columns = [
-        { header: 'Data/Hora', key: 'data', width: 20 },
-        { header: 'Usuário', key: 'usuario', width: 28 },
-        { header: 'E-mail', key: 'email', width: 30 },
-        { header: 'Associação', key: 'associacao', width: 24 },
-        { header: 'Módulo', key: 'modulo', width: 18 },
-        { header: 'Tipo de ação', key: 'tipo_acao', width: 22 },
-        { header: 'Descrição', key: 'descricao', width: 50 },
-        { header: 'IP', key: 'ip', width: 16 },
-    ];
-    planilha.getRow(1).font = { bold: true };
-
-    linhas.forEach((linha) => {
-        planilha.addRow({
-            data: new Date(linha.criado_em).toLocaleString('pt-BR'),
-            usuario: sanitizarCelulaExcel(nomeAtor(linha)),
-            email: sanitizarCelulaExcel(linha.usuario_email || linha.super_admin_email || '—'),
-            associacao: sanitizarCelulaExcel(linha.associacao_nome || '—'),
-            modulo: linha.modulo,
-            tipo_acao: ROTULOS_TIPO_ACAO[linha.tipo_acao] || linha.tipo_acao,
-            descricao: sanitizarCelulaExcel(linha.descricao),
-            ip: linha.ip || '—',
-        });
-    });
-
-    return workbook.xlsx.writeBuffer();
 }
 
 // pdfkit não tem suporte nativo a tabelas -- desenha manualmente com larguras
@@ -114,4 +92,4 @@ function gerarPdfLogs(linhas) {
     });
 }
 
-module.exports = { gerarExcelLogs, gerarPdfLogs };
+module.exports = { gerarPdfLogs };

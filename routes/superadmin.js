@@ -11,7 +11,7 @@ const { emailValido, gerarSenhaProvisoria, cpfValido, senhaForte, imagemBase64Va
 const { registrarEventoAuth } = require('../utils/authLog');
 const { registrarLogAuditoria } = require('../utils/auditoria');
 const { calcularValorMensalidade, statusAssinatura } = require('../utils/precos');
-const { gerarExcelLogs, gerarPdfLogs } = require('../utils/exportarLogs');
+const { gerarPdfLogs } = require('../utils/exportarLogs');
 
 const FORMAS_COBRANCA_VALIDAS = ['pix', 'boleto', 'cartao', 'dinheiro', 'outro'];
 // Opções fechadas (não é um intervalo livre) -- pedido explícito do item de
@@ -723,6 +723,13 @@ router.post('/associacoes', autorizarSuperAdmin(...GESTAO), async (req, res) => 
     if (!DIAS_ALERTA_ASSINATURA_VALIDOS.includes(diasAlertaAssinatura)) {
         return res.status(400).json({ erro: 'dias_alerta_assinatura deve ser um destes valores: ' + DIAS_ALERTA_ASSINATURA_VALIDOS.join(', ') });
     }
+    // Limite de ~2MB em base64, mesmo padrão de PUT /configuracoes/logo
+    // (achado na auditoria de segurança de 29/07/2026 -- essa rota aceitava
+    // logo de qualquer tamanho, inconsistente com toda outra rota de
+    // upload de imagem do sistema).
+    if (logo_base64 && logo_base64.length > 2_800_000) {
+        return res.status(400).json({ erro: 'Imagem muito grande. Escolha uma logo menor.' });
+    }
     if (logo_base64 && !imagemBase64Valida(logo_base64)) {
         return res.status(400).json({ erro: 'Logo inválida. Envie PNG, JPG, GIF ou WEBP.' });
     }
@@ -824,6 +831,11 @@ router.put('/associacoes/:id', autorizarSuperAdmin(...GESTAO), async (req, res) 
         && !DIAS_ALERTA_ASSINATURA_VALIDOS.includes(parseInt(dias_alerta_assinatura, 10))) {
         return res.status(400).json({ erro: 'dias_alerta_assinatura deve ser um destes valores: ' + DIAS_ALERTA_ASSINATURA_VALIDOS.join(', ') });
     }
+    // Limite de ~2MB em base64, mesmo padrão de PUT /configuracoes/logo
+    // (achado na auditoria de segurança de 29/07/2026).
+    if (logo_base64 && logo_base64.length > 2_800_000) {
+        return res.status(400).json({ erro: 'Imagem muito grande. Escolha uma logo menor.' });
+    }
     if (logo_base64 && !imagemBase64Valida(logo_base64)) {
         return res.status(400).json({ erro: 'Logo inválida. Envie PNG, JPG, GIF ou WEBP.' });
     }
@@ -870,11 +882,19 @@ router.put('/associacoes/:id', autorizarSuperAdmin(...GESTAO), async (req, res) 
             );
         }
 
+        // logo_url fora do log de auditoria de propósito (achado na
+        // auditoria de segurança de 29/07/2026) -- é a logo inteira em
+        // base64 (pode ter MBs), gravada em logs_auditoria.dados_novos a
+        // cada edição mesmo quando a edição não mexeu na logo, e
+        // logs_auditoria nunca é limpa (associacao_id usa ON DELETE SET
+        // NULL, não CASCADE). `anterior` já nem seleciona logo_url, por
+        // isso; aqui precisa excluir explicitamente do RETURNING da UPDATE.
+        const { logo_url, ...dadosNovosSemLogo } = resultado.rows[0];
         await registrarLogAuditoria(client, {
             associacaoId: id, superAdminId: req.superAdmin.id, superAdminNome: req.superAdmin.nome, superAdminEmail: req.superAdmin.email,
             modulo: 'associacoes', tipoAcao: 'edicao',
             descricao: req.superAdmin.nome + ' editou a associação "' + resultado.rows[0].nome + '"',
-            dadosAnteriores: anterior.rows[0], dadosNovos: resultado.rows[0], req,
+            dadosAnteriores: anterior.rows[0], dadosNovos: dadosNovosSemLogo, req,
         });
 
         await client.query('COMMIT');
@@ -1013,8 +1033,8 @@ router.get('/logs', async (req, res) => {
 // própria exportação como uma linha de auditoria (tipo_acao 'exportacao').
 router.get('/logs/exportar/:formato', autorizarSuperAdmin(...GESTAO), async (req, res) => {
     const { formato } = req.params;
-    if (!['excel', 'pdf'].includes(formato)) {
-        return res.status(400).json({ erro: 'formato deve ser "excel" ou "pdf"' });
+    if (formato !== 'pdf') {
+        return res.status(400).json({ erro: 'formato deve ser "pdf"' });
     }
 
     const client = await comConexaoSuperAdmin();
@@ -1038,13 +1058,6 @@ router.get('/logs/exportar/:formato', autorizarSuperAdmin(...GESTAO), async (req
             descricao: req.superAdmin.nome + ' exportou os logs de auditoria em ' + formato.toUpperCase() + ' (' + resultado.rows.length + ' linhas)',
             req,
         });
-
-        if (formato === 'excel') {
-            const buffer = await gerarExcelLogs(resultado.rows);
-            res.set('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-            res.set('Content-Disposition', 'attachment; filename="logs-auditoria.xlsx"');
-            return res.send(Buffer.from(buffer));
-        }
 
         const buffer = await gerarPdfLogs(resultado.rows);
         res.set('Content-Type', 'application/pdf');

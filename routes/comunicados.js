@@ -3,7 +3,7 @@ const express = require('express');
 const { autenticar, bloquearSenhaProvisoria, bloquearTrialExpirado, exigirPlano, autorizar, comConexaoTenant } = require('../middleware/auth');
 const { registrarAtividade } = require('../utils/atividadeLog');
 const { registrarLogAuditoria } = require('../utils/auditoria');
-const { gerarExcelLeituras, gerarPdfLeituras } = require('../utils/exportarLeiturasComunicado');
+const { gerarPdfLeituras } = require('../utils/exportarLeiturasComunicado');
 
 const router = express.Router();
 router.use(autenticar);
@@ -231,13 +231,13 @@ router.get('/:id/leituras', autorizar('admin', 'diretoria', 'financeiro', 'atend
 });
 
 // GET /comunicados/:id/leituras/exportar/:formato — mesma lista acima, em
-// Excel/PDF; registra a exportação como linha de auditoria (mesmo padrão
-// de GET /superadmin/logs/exportar/:formato). Exigido plano Intermediário+
+// PDF; registra a exportação como linha de auditoria (mesmo padrão de
+// GET /superadmin/logs/exportar/:formato). Exigido plano Intermediário+
 // (gating por plano, 29/07/2026 — "Relatórios exportáveis" na landing).
 router.get('/:id/leituras/exportar/:formato', autorizar('admin', 'diretoria', 'financeiro', 'atendimento', 'operador', 'consulta'), exigirPlano('intermediario'), async (req, res) => {
     const { id, formato } = req.params;
-    if (!['excel', 'pdf'].includes(formato)) {
-        return res.status(400).json({ erro: 'formato deve ser "excel" ou "pdf"' });
+    if (formato !== 'pdf') {
+        return res.status(400).json({ erro: 'formato deve ser "pdf"' });
     }
 
     const client = await comConexaoTenant(req.usuario.associacao_id);
@@ -265,13 +265,6 @@ router.get('/:id/leituras/exportar/:formato', autorizar('admin', 'diretoria', 'f
             descricao: req.usuario.nome + ' exportou a lista de leituras do comunicado "' + comunicado.rows[0].titulo + '" em ' + formato.toUpperCase(),
             req,
         });
-
-        if (formato === 'excel') {
-            const buffer = await gerarExcelLeituras(comunicado.rows[0].titulo, resultado.rows);
-            res.set('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-            res.set('Content-Disposition', 'attachment; filename="leituras-comunicado.xlsx"');
-            return res.send(Buffer.from(buffer));
-        }
 
         const buffer = await gerarPdfLeituras(comunicado.rows[0].titulo, resultado.rows);
         res.set('Content-Type', 'application/pdf');
