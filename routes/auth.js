@@ -307,6 +307,26 @@ router.put('/senha', autenticar, async (req, res) => {
     }
 });
 
+// PATCH /auth/boas-vindas-visto
+// Marca que o usuário logado já fechou o modal de boas-vindas do primeiro
+// acesso (ver GET /plano -> boas_vindas_pendente) -- gravado no banco, não
+// em localStorage, pra não reaparecer ao trocar de navegador/limpar cache.
+router.patch('/boas-vindas-visto', autenticar, async (req, res) => {
+    const client = await comConexaoTenant(req.usuario.associacao_id);
+    try {
+        await client.query(
+            `UPDATE usuarios SET boas_vindas_visto_em = now() WHERE id = $1 AND boas_vindas_visto_em IS NULL`,
+            [req.usuario.id]
+        );
+        res.json({ ok: true });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ erro: 'Erro ao registrar' });
+    } finally {
+        client.release();
+    }
+});
+
 // POST /auth/logout
 // JWT é stateless (não há revogação server-side ainda) — esse endpoint só
 // registra o evento para auditoria; quem efetivamente encerra a sessão é o

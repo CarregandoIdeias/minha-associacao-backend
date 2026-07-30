@@ -25,7 +25,7 @@ router.get('/', autorizar('admin', 'diretoria'), async (req, res) => {
     const client = await comConexaoTenant(req.usuario.associacao_id);
     try {
         const associacao = await client.query(
-            `SELECT plano, ativo, trial_dias, trial_expira_em, vencimento_assinatura,
+            `SELECT nome, plano, ativo, trial_dias, trial_expira_em, vencimento_assinatura,
                     valor_mensalidade_manual, dias_alerta_vencimento, dias_alerta_assinatura
              FROM associacoes WHERE id = $1`,
             [req.usuario.associacao_id]
@@ -34,6 +34,16 @@ router.get('/', autorizar('admin', 'diretoria'), async (req, res) => {
             return res.status(404).json({ erro: 'Associação não encontrada' });
         }
         const a = associacao.rows[0];
+
+        // Flag de "já viu o modal de boas-vindas" -- vive em usuarios (é por
+        // usuário, não por associação), buscada aqui pra reaproveitar a
+        // mesma chamada que já roda logo após o login (ver entrarNoDashboard,
+        // painel/index.html) em vez de criar uma rota só pra isso.
+        const usuarioRow = await client.query(
+            `SELECT boas_vindas_visto_em FROM usuarios WHERE id = $1`,
+            [req.usuario.id]
+        );
+        const boasVindasPendente = usuarioRow.rows.length > 0 && usuarioRow.rows[0].boas_vindas_visto_em === null;
 
         const totalAssociados = await client.query(
             `SELECT COUNT(*) AS total FROM associados WHERE associacao_id = $1`,
@@ -60,6 +70,8 @@ router.get('/', autorizar('admin', 'diretoria'), async (req, res) => {
         const pertoDoLimite = limiteAssociados != null && total >= limiteAssociados * 0.9;
 
         res.json({
+            nome_associacao: a.nome,
+            boas_vindas_pendente: boasVindasPendente,
             plano: a.plano,
             trial_dias: a.trial_dias,
             trial_expira_em: a.trial_expira_em,

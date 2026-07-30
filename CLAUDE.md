@@ -11,6 +11,47 @@ associações — Super Admin cadastra associações-clientes, cada uma com seu
 admin/diretoria/associados isolados das outras. Front-end em
 `../painel` (HTML/JS puro, repositório separado), consome essa API.
 
+## Modal de boas-vindas no primeiro acesso (admin e associado, 30/07/2026)
+
+Pedido do usuário depois de ver o painel funcionando: mostrar um modal só
+na primeira vez que cada usuário loga (admin/diretoria no painel da
+associação, associado no portal), com botão "Começar a usar a
+plataforma" que fecha e nunca mais reaparece — persistido no banco, não
+em `localStorage` (senão reapareceria ao trocar de navegador/limpar
+cache, problema já visto em outros fluxos do projeto).
+
+Nova coluna `usuarios.boas_vindas_visto_em timestamptz` (migration
+`20260730000000_boas_vindas_usuario.sql`, aditiva, nullable — `NULL` =
+"ainda não viu"). **É por usuário, não por papel** — a mesma coluna e o
+mesmo endpoint servem tanto pro admin quanto pro associado, sem
+duplicação:
+
+- `PATCH /auth/boas-vindas-visto` (novo, `routes/auth.js`, qualquer
+  papel autenticado) — `UPDATE usuarios SET boas_vindas_visto_em = now()
+  WHERE id = req.usuario.id AND boas_vindas_visto_em IS NULL`. Chamado
+  no clique do botão, front já esconde o modal na hora sem esperar a
+  resposta (fire-and-forget, mesmo padrão de `marcarComunicadosVisiveisComoLidos`
+  do portal).
+- `GET /plano` (`routes/plano.js`, admin/diretoria) ganhou
+  `boas_vindas_pendente` e `nome_associacao` — reaproveita a mesma
+  chamada que `entrarNoDashboard()` já faz logo após login/restaurar
+  sessão (`painel/index.html`), sem rota nova só pra isso.
+- `GET /portal/meus-dados` (`routes/portal.js`, associado) ganhou os
+  mesmos dois campos, pelo mesmo motivo — é a primeira chamada que
+  `carregarInicio()` faz em `portal.html`.
+
+Testado em staging: usuário admin e usuário associado de teste criados
+via `pool.connect()` direto (mesmo padrão de sempre), `curl` confirmando
+`boas_vindas_pendente: true` no primeiro `GET`, `false` depois do
+`PATCH`, permanentemente. Durante o teste do fluxo do associado a
+instabilidade intermitente do pooler (ver seção própria abaixo) voltou a
+aparecer, dessa vez persistente por alguns minutos e afetando login de
+qualquer usuário (inclusive um já apagado) — confirmado como falha de
+infraestrutura pré-existente, não relacionada a este código; a correção
+foi validada por outras vias (sintaxe, queries diretas no banco,
+round-trip HTTP completo obtido antes da instabilidade começar). Dados
+de teste removidos ao final.
+
 ## Auditoria de segurança pré-lançamento — itens de severidade baixa corrigidos (29/07/2026, continuação)
 
 Depois dos 5 médios (seção seguinte), o usuário pediu pra resolver também

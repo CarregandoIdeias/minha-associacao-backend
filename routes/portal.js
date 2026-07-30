@@ -25,7 +25,26 @@ router.get('/meus-dados', async (req, res) => {
         if (resultado.rows.length === 0) {
             return res.status(404).json({ erro: 'Nenhum cadastro de associado vinculado a esse login' });
         }
-        res.json(resultado.rows[0]);
+
+        // Mesma flag de boas-vindas usada no painel da associação (ver
+        // GET /plano, backend/routes/plano.js) -- é por usuário, não por
+        // papel, então o mesmo PATCH /auth/boas-vindas-visto serve pros dois.
+        const usuarioRow = await client.query(
+            `SELECT boas_vindas_visto_em FROM usuarios WHERE id = $1`,
+            [req.usuario.id]
+        );
+        const boasVindasPendente = usuarioRow.rows.length > 0 && usuarioRow.rows[0].boas_vindas_visto_em === null;
+
+        const associacaoRow = await client.query(
+            `SELECT nome FROM associacoes WHERE id = $1`,
+            [req.usuario.associacao_id]
+        );
+
+        res.json({
+            ...resultado.rows[0],
+            boas_vindas_pendente: boasVindasPendente,
+            nome_associacao: associacaoRow.rows[0] ? associacaoRow.rows[0].nome : '',
+        });
     } catch (err) {
         console.error(err);
         res.status(500).json({ erro: 'Erro ao buscar seus dados' });
