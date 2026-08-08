@@ -3,7 +3,7 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const { autenticar, bloquearSenhaProvisoria, bloquearTrialExpirado, autorizar, comConexaoTenant } = require('../middleware/auth');
-const { cpfValido, emailValido, gerarSenhaProvisoria } = require('../utils/validacao');
+const { cpfValido, emailValido, gerarSenhaProvisoria, textoLivreValido } = require('../utils/validacao');
 const { registrarEventoAuth } = require('../utils/authLog');
 const { registrarAtividade } = require('../utils/atividadeLog');
 const { registrarLogAuditoria } = require('../utils/auditoria');
@@ -85,6 +85,9 @@ router.post('/', autorizar('admin', 'diretoria', 'atendimento', 'operador'), asy
     }
     if (!email || !emailValido(email)) {
         return res.status(400).json({ erro: 'e-mail válido é obrigatório' });
+    }
+    if (!textoLivreValido(observacao, 2000)) {
+        return res.status(400).json({ erro: 'observação inválida (máx. 2000 caracteres, sem caracteres de controle)' });
     }
 
     // Bloqueio de novos cadastros ao atingir o limite do plano (item 7,
@@ -205,6 +208,9 @@ router.put('/:id', autorizar('admin', 'diretoria', 'atendimento', 'operador'), a
     const statusValidos = ['ativo', 'inadimplente', 'desligado', 'suspenso'];
     if (status && !statusValidos.includes(status)) {
         return res.status(400).json({ erro: 'status inválido' });
+    }
+    if (!textoLivreValido(observacao, 2000)) {
+        return res.status(400).json({ erro: 'observação inválida (máx. 2000 caracteres, sem caracteres de controle)' });
     }
 
     const client = await comConexaoTenant(req.usuario.associacao_id);

@@ -48,6 +48,28 @@ function nomeValido(nome) {
     return true;
 }
 
+// Valida campo de texto livre longo (observação do associado, etc.). Achado na
+// auditoria de 07/08/2026: `observacao` não tinha validação NENHUMA e a coluna
+// é `text` (sem teto) no Postgres -- dava pra gravar megabytes por associado, e
+// o valor ia parar dentro de um atributo HTML no painel.
+//
+// Diferente de nomeValido(): permite \t, \n e \r (quebra de linha é legítima
+// aqui) e aceita bem mais caracteres, mas continua barrando os demais
+// caracteres de controle e impondo um teto de tamanho.
+//
+// NÃO bloqueia aspas de propósito -- são legítimas em texto livre ("o associado
+// disse que não viria"). A defesa contra XSS é o escape correto na renderização
+// (escapeHtml no painel, que desde 07/08/2026 escapa aspas também); esta função
+// é a segunda camada, não a principal.
+function textoLivreValido(valor, maxLength) {
+    if (valor === null || valor === undefined || valor === '') return true; // campo opcional
+    if (typeof valor !== 'string') return false;
+    if (valor.length > (maxLength || 2000)) return false;
+    // Barra controles, menos \t (09), \n (0A) e \r (0D).
+    if (/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/.test(valor)) return false;
+    return true;
+}
+
 // Valida um data URL base64 de ponta a ponta (não só o prefixo).
 //
 // IMPORTANTE -- essa validação é de SEGURANÇA, não só de formato. Antes existia
@@ -131,6 +153,7 @@ module.exports = {
     cpfValido,
     emailValido,
     nomeValido,
+    textoLivreValido,
     senhaForte,
     gerarSenhaProvisoria,
     imagemBase64Valida,
