@@ -51,6 +51,54 @@ não casa nenhuma linha. Qualquer policy nova que leia um GUC e faça cast
 tem que usar `NULLIF(..., '')` — a query de conferência está no rodapé da
 migration.
 
+## RLS estava desligado na prática: flag de bypass vazando entre requisições (07/08/2026)
+
+**O achado mais grave da rodada de QA**, encontrado por acidente ao validar
+a migration do `NULLIF`: um teste de isolamento falhou e a primeira suspeita
+foi ter enfraquecido as policies. Não era — o bug é **anterior**, e não tem
+relação com aquela migration.
+
+`comConexaoSuperAdmin()` setava `app.superadmin_bypass = 'true'` em nível de
+**sessão** (`is_local = false`), e `client.release()` devolve a conexão pro
+pool **sem limpar nada**. Como o pool reaproveita a mesma conexão física, a
+requisição de tenant seguinte herdava a flag — rodando com o **RLS
+efetivamente desligado**. Idem para `app.auth_bypass` (login/redefinição de
+senha).
+
+Confirmado na prática, com os helpers reais e `DB_POOL_MAX=1` (pior caso
+realista, pois sob carga a conexão é reusada o tempo todo):
+
+| Cenário | `app.superadmin_bypass` | Tenant A enxergava |
+|---|---|---|
+| depois de uma requisição de super-admin | `"true"` | **associados de A e de B** |
+| conexão limpa (controle) | `""` | só os de A |
+
+**Nunca virou vazamento de dado observável** porque toda query da aplicação
+também filtra `WHERE associacao_id = $1` na mão. Mas é exatamente essa a
+camada que deveria segurar quando esse filtro faltar — e o
+`README`/`CLAUDE.md` afirmavam que "o Postgres recusa fisicamente misturar
+dados entre associações", o que estava valendo **só por sorte**. Uma rota
+nova esquecendo o filtro (ou uma query que legitimamente não tem como
+filtrar, como as de `portal.js` que se apoiam em `usuario_id`) viraria
+brecha cross-tenant direta.
+
+Corrigido em `middleware/auth.js`: as três flags passam a ser declaradas
+**sempre**, por toda conexão, via `sqlSessao()` — quem é tenant zera os dois
+bypass, quem é bypass zera o tenant. Não existe mais estado herdado.
+
+Detalhe que **não** dá pra fazer: usar `set_config(x, NULL, false)` pra
+"limpar" — isso equivale a um RESET, e GUC customizado resetado devolve
+string vazia (é a causa raiz descrita na seção acima). Por isso o sentinela
+`TENANT_NENHUM` (`00000000-...`), que casta sem erro e não casa nenhuma
+linha, **com ou sem** a migration do `NULLIF` aplicada — os dois consertos
+ficam independentes de propósito, já que produção ainda não recebeu a
+migration.
+
+**Testado** (10/10, com `DB_POOL_MAX=1`): vazamento fechado nos três
+sentidos (super-admin→tenant, auth→tenant, tenant A→tenant B) e as duas
+regressões que importam (super-admin continua enxergando tudo; `auth_bypass`
+continua lendo `associacoes`, sem o que o login não funciona).
+
 ## QA exploratório pré-cliente — 8 achados corrigidos (07/08/2026)
 
 Bateria de 71 asserções (segurança + funcionalidade) contra staging,

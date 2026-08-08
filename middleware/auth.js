@@ -203,6 +203,37 @@ async function comConexaoComSessao(sqlSet, valores) {
     }
 }
 
+// Uuid sentinela para "nenhum tenant nesta conexão". Não dá pra usar NULL:
+// set_config(x, NULL, false) equivale a um RESET, e um GUC customizado
+// resetado passa a devolver STRING VAZIA -- que é exatamente a causa raiz da
+// instabilidade histórica (ver migration 20260807000000). Um uuid que nunca
+// existe casta sem erro e não casa nenhuma linha, com ou sem aquela migration
+// aplicada.
+const TENANT_NENHUM = '00000000-0000-0000-0000-000000000000';
+
+// TODA conexão precisa declarar as três flags, sempre -- não só a sua.
+//
+// Achado no QA de 07/08/2026: as flags são de SESSÃO (is_local = false) e o
+// client.release() devolve a conexão pro pool SEM limpar nada. Como o pool
+// reaproveita a mesma conexão física, uma requisição de super-admin deixava
+// `app.superadmin_bypass = 'true'` grudado, e a PRÓXIMA requisição de tenant
+// naquela conexão rodava com o bypass ligado -- ou seja, com o RLS
+// efetivamente desligado. Confirmado na prática: tenant A enxergando os
+// associados de B.
+//
+// Nunca virou vazamento de dado porque toda query da aplicação também filtra
+// por `WHERE associacao_id = $1` na mão. Mas o RLS é justamente a camada que
+// deveria segurar quando esse filtro faltar (ou for esquecido numa rota nova),
+// e ela estava valendo só por sorte.
+function sqlSessao({ tenant = TENANT_NENHUM, superadmin = false, auth = false }) {
+    return {
+        sql: `SELECT set_config('app.current_associacao_id', $1, false),
+                     set_config('app.superadmin_bypass', $2, false),
+                     set_config('app.auth_bypass', $3, false)`,
+        valores: [tenant, superadmin ? 'true' : 'false', auth ? 'true' : 'false'],
+    };
+}
+
 // Abre uma conexão dedicada do pool e ativa o isolamento por tenant (RLS).
 // Necessário porque "SET" é por conexão, não pode usar pool.query direto
 // quando o isolamento depende de estado de sessão.
@@ -210,7 +241,8 @@ async function comConexaoTenant(associacaoId) {
     if (!UUID_REGEX.test(associacaoId)) {
         throw new Error('associacaoId inválido');
     }
-    return comConexaoComSessao(`SELECT set_config('app.current_associacao_id', $1, false)`, [associacaoId]);
+    const { sql, valores } = sqlSessao({ tenant: associacaoId });
+    return comConexaoComSessao(sql, valores);
 }
 
 // Verifica o token de SUPER-ADMIN (separado do login das associações) e
@@ -306,7 +338,8 @@ function autorizarSuperAdmin(...papeisPermitidos) {
 // dados de todas as associações. A flag só é setada aqui, nunca a partir de
 // input do usuário — é isso que torna o bypass seguro.
 async function comConexaoSuperAdmin() {
-    return comConexaoComSessao(`SELECT set_config('app.superadmin_bypass', 'true', false)`);
+    const { sql, valores } = sqlSessao({ superadmin: true });
+    return comConexaoComSessao(sql, valores);
 }
 
 // Abre uma conexão dedicada com bypass para os fluxos públicos de
@@ -316,7 +349,8 @@ async function comConexaoSuperAdmin() {
 // descobrindo). Mesmo princípio de segurança do comConexaoSuperAdmin: a
 // flag nunca vem de input do usuário, só é setada por este código.
 async function comConexaoAuth() {
-    return comConexaoComSessao(`SELECT set_config('app.auth_bypass', 'true', false)`);
+    const { sql, valores } = sqlSessao({ auth: true });
+    return comConexaoComSessao(sql, valores);
 }
 
 module.exports = {
