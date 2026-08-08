@@ -9,7 +9,10 @@ const { registrarAtividade } = require('../utils/atividadeLog');
 const { registrarLogAuditoria } = require('../utils/auditoria');
 const { LIMITE_ASSOCIADOS_PLANO } = require('../utils/precos');
 
+const paramUuid = require('../middleware/paramUuid');
 const router = express.Router();
+// Rejeita :id que nao seja uuid com 400, em vez de deixar virar 500 no Postgres
+router.param('id', paramUuid);
 
 // Todas as rotas abaixo exigem estar logado
 router.use(autenticar);

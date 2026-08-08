@@ -4,7 +4,10 @@ const express = require('express');
 const { autenticar, bloquearSenhaProvisoria, bloquearTrialExpirado, autorizar, comConexaoTenant } = require('../middleware/auth');
 const { imagemBase64Valida, comprovanteBase64Valido } = require('../utils/validacao');
 
+const paramUuid = require('../middleware/paramUuid');
 const router = express.Router();
+// Rejeita :id que nao seja uuid com 400, em vez de deixar virar 500 no Postgres
+router.param('id', paramUuid);
 router.use(autenticar);
 router.use(bloquearSenhaProvisoria);
 router.use(bloquearTrialExpirado);

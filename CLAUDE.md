@@ -4,6 +4,123 @@ Contexto rápido para sessões de IA trabalhando neste repositório. Para o
 quadro completo (rotas, modelo de dados, roadmap), ver `README.md`. Para
 tudo sobre migrações e RLS, ver `supabase/README.md`.
 
+## CAUSA RAIZ da instabilidade intermitente: RLS castando GUC vazio (07/08/2026)
+
+**Isto resolve o mistério aberto desde 26/07** (ver seção "Instabilidade
+intermitente do pooler" mais abaixo, que ficava em "causa exata ainda não
+confirmada" e culpava uma suposta resposta de query vazando entre
+conexões). **Não era isso.**
+
+Descoberto durante a bateria de QA do mesmo dia: o teste abortava sempre
+no mesmo `INSERT INTO associacoes` — uma query **sem nenhum parâmetro
+uuid** — com `22P02 invalid input syntax for type uuid: ""`. Reproduzido
+de forma limpa:
+
+| Passo | `current_setting('app.current_associacao_id', true)` |
+|---|---|
+| conexão nova | `NULL` |
+| depois de `set_config(...)` com um uuid | o uuid |
+| **depois de `RESET ALL` / `DISCARD ALL`** | **`''` (string vazia), não `NULL`** |
+
+No Postgres, um GUC customizado que já foi setado na sessão e depois
+resetado **não volta a ser inexistente** — passa a devolver string vazia.
+E `RESET ALL`/`DISCARD ALL` é exatamente o que o PgBouncer roda ao
+devolver uma conexão física pro pool. Como as 13 policies faziam
+`current_setting(...)::uuid`, qualquer conexão reciclada que já tivesse
+sido usada por alguém que setou o tenant passava a **estourar toda query
+naquela tabela**.
+
+Isso explica cada peculiaridade que estava sem resposta: era intermitente
+(depende de pegar conexão reciclada ou nova); piorava "a frio" (mais
+reciclagem); os retries mitigavam (a nova tentativa pega outra conexão
+física); aparecia em query sem uuid nenhum (o cast está na **policy**, não
+na query); e atingia até rota de super-admin, que nem seta esse GUC.
+
+Corrigido pela migration `20260807000000_rls_nullif_guc_vazio.sql`:
+`NULLIF(current_setting(...), '')::uuid` nas 13 policies. Usa `ALTER
+POLICY` (não DROP+CREATE) de propósito — não existe janela em que a tabela
+fica sem policy, então roda com a aplicação no ar. **Sem mudança de
+semântica de segurança**: onde antes dava erro, agora não casa nenhuma
+linha; o erro nunca liberou acesso.
+
+**Cuidado ao mexer nisso**: `set_config('app.x', NULL, false)` **não**
+serve pra "limpar" — equivale a um RESET, que é justamente o que gera a
+string vazia. Se precisar neutralizar o GUC numa conexão, use um uuid
+sentinela (`'00000000-0000-0000-0000-000000000000'`), que casta sem erro e
+não casa nenhuma linha. Qualquer policy nova que leia um GUC e faça cast
+tem que usar `NULLIF(..., '')` — a query de conferência está no rodapé da
+migration.
+
+## QA exploratório pré-cliente — 8 achados corrigidos (07/08/2026)
+
+Bateria de 71 asserções (segurança + funcionalidade) contra staging,
+pedida antes do primeiro cliente. Tokens assinados direto com o
+`JWT_SECRET` local pra não esbarrar no rate limit de login (10/15min) —
+`autenticar()` revalida tudo no banco de qualquer forma, então o teste
+continua realista.
+
+**Passou de primeira** (não mexido): isolamento entre associações 17/17
+(admin de A não alcança nenhum recurso de B, nenhuma listagem vaza),
+permissões por papel, token/sessão 10/10 (forjado, expirado, usuário
+desativado, associação bloqueada, token anterior à troca de senha),
+fluxo de cobrança (duplo-pagamento 409, editar paga 409, estorno
+removendo o pagamento), trial e gating por plano.
+
+**Corrigidos:**
+
+1. **`PUT /usuarios/:id` promovia qualquer um a `admin`** — `POST
+   /usuarios` rejeita o papel `admin` (whitelist sem ele), mas o `PUT`
+   aceitava: a regra era contornável em dois passos (criar como
+   `consulta`, promover depois). Decisão de produto confirmada com o
+   usuário: **só o Super Admin designa admin de associação**. Bloqueia só
+   a **promoção**, não o valor em si — a tela de edição manda `papel`
+   sempre junto com o nome, então recusar `'admin'` de forma cega
+   quebraria editar o nome de um admin que já existe; quando o alvo já é
+   admin, o valor é no-op e passa (403 `PROMOCAO_ADMIN_NEGADA` caso
+   contrário).
+
+2. **`POST /cobrancas` aceitava `associado_id` de outra associação** — o
+   INSERT passava, porque a FK só confere que a linha existe e o RLS só
+   olha o `associacao_id` da própria cobrança. Criava uma linha órfã que
+   **nenhum dos dois tenants enxergava** (some do JOIN com `associados`
+   dos dois lados). De quebra, o 201-vs-erro virava um oráculo fraco:
+   respondia se um uuid qualquer é associado em alguma associação da
+   plataforma. Agora confere `WHERE id = $1 AND associacao_id = $2` antes
+   do INSERT (404 nos dois casos, oráculo fechado).
+
+3. **`vencimento` inválido virava 500** — data não parseável ia direto pro
+   INSERT. Novo `dataValida()` (rejeita "Invalid Date" e ano fora de
+   1900-2200), aplicado no `POST` e no `PUT` de cobranças.
+
+4. **`valor` sem teto** — a coluna é `numeric` **sem precisão**, então o
+   banco aceitava `1e20` alegremente (o QA criou uma cobrança nesse
+   valor). Não é falha de segurança, mas num campo de dinheiro um zero a
+   mais digitado sem querer vira cobrança absurda pro associado. Novo
+   `valorMonetarioValido()` (finito, ≥ 0, teto de R$ 1.000.000, no máximo
+   2 casas decimais — a folga de `1e-9` absorve imprecisão de float).
+
+5. **JSON malformado virava 500** — o `express.json()` lança `SyntaxError`,
+   que caía no handler global. Agora 400. Corpo acima do limite virou 413
+   (era 500 também).
+
+6. **Toda rota `/:id` virava 500 com id não-uuid** — o valor ia direto pro
+   Postgres (`22P02`) e saía como "Erro interno do servidor". Resolvido de
+   forma central com `middleware/paramUuid.js` + `router.param('id',
+   paramUuid)` nos 7 routers que usam `:id` (confirmado antes no
+   `information_schema` que **todas** as colunas `id` dessas tabelas são
+   uuid, então não existe rota legítima que receba outra coisa).
+   **Ordem importa e foi testada**: o `router.param` roda depois dos
+   `router.use(autenticar)`, então requisição sem token com id inválido
+   continua devolvendo 401, não 400 — não vira oráculo.
+
+Achados 2 e 3 também fecharam o oráculo do achado que estava listado
+separado (201 vs 500 revelando existência cross-tenant).
+
+**Por que tantos "500 que deviam ser 4xx" importam com cliente real**: não
+são falha de segurança, mas fazem a aplicação parecer quebrada para quem
+só digitou algo errado, e afogam no log o 500 de verdade quando ele
+acontecer.
+
 ## Auditoria de segurança pré-cliente — XSS por quebra de atributo + 3 itens baixos (07/08/2026)
 
 Pedida pelo usuário ao fechar o **primeiro cliente real** ("não posso
@@ -674,6 +791,16 @@ revertido em minutos). Se for mexer nessa variável de novo: confirmar
 antes que o ambiente de destino suporta IPv6, ou usar sempre o pooler.
 
 ## Instabilidade intermitente do pooler — causa encontrada e mitigada (26-27/07/2026)
+
+> **DESATUALIZADO EM 07/08/2026 — leia antes a seção "CAUSA RAIZ da
+> instabilidade intermitente: RLS castando GUC vazio" no topo deste
+> arquivo.** A hipótese registrada abaixo ("resposta de outra query
+> vazando pela conexão") estava **errada**. A causa real é a policy de RLS
+> fazendo `current_setting('app.current_associacao_id', true)::uuid` numa
+> conexão reciclada pelo PgBouncer, onde esse GUC volta como string vazia
+> em vez de NULL. O resto desta seção continua valendo como histórico e
+> pelas mitigações (retry, `pool.on('error')`, o caso do
+> `statement_timeout` no startup packet), que seguem em pé.
 
 De vez em quando (mais depois de reconexões "a frio", ex. após um período
 ocioso), `autenticar()` e a query de login do backend recebiam do Postgres

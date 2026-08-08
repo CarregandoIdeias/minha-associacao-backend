@@ -3,9 +3,12 @@ const express = require('express');
 const { autenticar, bloquearSenhaProvisoria, bloquearTrialExpirado, autorizar, comConexaoTenant } = require('../middleware/auth');
 const { registrarAtividade } = require('../utils/atividadeLog');
 const { registrarLogAuditoria } = require('../utils/auditoria');
-const { inteiroPositivo } = require('../utils/validacao');
+const { inteiroPositivo, uuidValido, dataValida, valorMonetarioValido } = require('../utils/validacao');
 
+const paramUuid = require('../middleware/paramUuid');
 const router = express.Router();
+// Rejeita :id que nao seja uuid com 400, em vez de deixar virar 500 no Postgres
+router.param('id', paramUuid);
 router.use(autenticar);
 router.use(bloquearSenhaProvisoria);
 router.use(bloquearTrialExpirado);
@@ -113,12 +116,34 @@ router.post('/', autorizar('admin', 'diretoria', 'financeiro', 'operador'), asyn
     if (!associado_id || !valor || !vencimento) {
         return res.status(400).json({ erro: 'associado_id, valor e vencimento são obrigatórios' });
     }
-    if (isNaN(parseFloat(valor)) || parseFloat(valor) < 0) {
-        return res.status(400).json({ erro: 'valor inválido' });
+    if (!uuidValido(associado_id)) {
+        return res.status(400).json({ erro: 'associado_id inválido' });
+    }
+    if (!valorMonetarioValido(valor)) {
+        return res.status(400).json({ erro: 'valor inválido (máx. R$ 1.000.000,00, com até 2 casas decimais)' });
+    }
+    if (!dataValida(vencimento)) {
+        return res.status(400).json({ erro: 'vencimento inválido' });
     }
 
     const client = await comConexaoTenant(req.usuario.associacao_id);
     try {
+        // O associado precisa ser DESTA associação. Sem essa checagem (achado
+        // do QA de 07/08/2026) dava pra criar uma cobrança apontando pro
+        // associado de outra associação: o INSERT passava, porque a FK só
+        // confere que a linha existe e o RLS só olha o associacao_id da
+        // própria cobrança. O resultado era uma linha órfã que NENHUM dos dois
+        // tenants enxergava (some do JOIN com associados dos dois lados) --
+        // e, de quebra, o 201-vs-erro respondia se um uuid qualquer é
+        // associado em alguma associação da plataforma.
+        const associado = await client.query(
+            `SELECT id FROM associados WHERE id = $1 AND associacao_id = $2`,
+            [associado_id, req.usuario.associacao_id]
+        );
+        if (associado.rows.length === 0) {
+            return res.status(404).json({ erro: 'Associado não encontrado' });
+        }
+
         const resultado = await client.query(
             `INSERT INTO cobrancas (associacao_id, associado_id, descricao, valor, vencimento)
              VALUES ($1, $2, $3, $4, $5)
@@ -277,8 +302,11 @@ router.put('/:id', autorizar('admin', 'diretoria', 'financeiro', 'operador'), as
     if (!valor || !vencimento) {
         return res.status(400).json({ erro: 'valor e vencimento são obrigatórios' });
     }
-    if (isNaN(parseFloat(valor)) || parseFloat(valor) < 0) {
-        return res.status(400).json({ erro: 'valor inválido' });
+    if (!valorMonetarioValido(valor)) {
+        return res.status(400).json({ erro: 'valor inválido (máx. R$ 1.000.000,00, com até 2 casas decimais)' });
+    }
+    if (!dataValida(vencimento)) {
+        return res.status(400).json({ erro: 'vencimento inválido' });
     }
 
     const client = await comConexaoTenant(req.usuario.associacao_id);

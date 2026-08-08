@@ -18,7 +18,10 @@ const { registrarEventoAuth } = require('../utils/authLog');
 const { registrarAtividade } = require('../utils/atividadeLog');
 const { registrarLogAuditoria } = require('../utils/auditoria');
 
+const paramUuid = require('../middleware/paramUuid');
 const router = express.Router();
+// Rejeita :id que nao seja uuid com 400, em vez de deixar virar 500 no Postgres
+router.param('id', paramUuid);
 router.use(autenticar);
 router.use(bloquearSenhaProvisoria);
 router.use(bloquearTrialExpirado);
@@ -346,6 +349,22 @@ router.put('/:id', autorizar('admin'), async (req, res) => {
         );
         if (anterior.rows.length === 0) {
             return res.status(404).json({ erro: 'Usuário não encontrado' });
+        }
+
+        // Só o Super Admin designa administrador de associação (decisão de
+        // produto, 07/08/2026). POST /usuarios já rejeitava o papel 'admin',
+        // mas esta rota aceitava -- ou seja, a regra do POST era contornável
+        // em dois passos (criar como 'consulta', depois promover aqui).
+        //
+        // Bloqueia só a PROMOÇÃO, não o valor em si: a tela de edição manda
+        // `papel` sempre, junto com o nome, então recusar 'admin' de forma
+        // cega quebraria editar o nome de um admin que já existe. Quando o
+        // alvo já é admin, o valor é no-op e passa.
+        if (papel === 'admin' && anterior.rows[0].papel !== 'admin') {
+            return res.status(403).json({
+                erro: 'Apenas o Super Admin pode designar um administrador da associação.',
+                codigo: 'PROMOCAO_ADMIN_NEGADA',
+            });
         }
 
         const resultado = await client.query(

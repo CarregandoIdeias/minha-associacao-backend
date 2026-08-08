@@ -75,8 +75,22 @@ app.get('/', (req, res) => {
 // descarta a conexão morta e tenta outra). Este handler é o cinto de segurança
 // para qualquer outro caso: sempre devolve uma resposta.
 app.use((err, req, res, next) => {
-    console.error('Erro não tratado em', req.method, req.originalUrl, '->', err);
     if (res.headersSent) return next(err);
+
+    // Corpo que não é JSON válido é erro do CLIENTE (400), não do servidor.
+    // O express.json() lança SyntaxError nesse caso, que caía direto no 500
+    // abaixo -- achado do QA de 07/08/2026. Um 500 aqui é ruim de duas
+    // formas: faz parecer que a aplicação quebrou e polui o log de erro real
+    // com ruído de requisição malformada.
+    if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
+        return res.status(400).json({ erro: 'Corpo da requisição não é um JSON válido' });
+    }
+    // Corpo acima do limite do express.json() -- também é 4xx, não 5xx.
+    if (err.type === 'entity.too.large') {
+        return res.status(413).json({ erro: 'Requisição grande demais' });
+    }
+
+    console.error('Erro não tratado em', req.method, req.originalUrl, '->', err);
     res.status(500).json({ erro: 'Erro interno do servidor' });
 });
 

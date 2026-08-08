@@ -48,6 +48,45 @@ function nomeValido(nome) {
     return true;
 }
 
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// Formato de uuid. Vale como guarda de entrada antes de mandar o valor pro
+// Postgres: sem isso, um id malformado vindo do corpo/rota vira erro 22P02
+// ("invalid input syntax for type uuid") e sai como 500, quando na verdade é
+// entrada inválida do cliente (400).
+function uuidValido(valor) {
+    return typeof valor === 'string' && UUID_REGEX.test(valor);
+}
+
+// Data aceitável para vencimento/competência. Aceita 'YYYY-MM-DD' e qualquer
+// coisa que o Date entenda, mas rejeita o que viraria "Invalid Date" -- que
+// antes chegava no INSERT e estourava como 500 (achado do QA de 07/08/2026).
+// Também impõe uma faixa sã de anos: data absurda quase sempre é dedo errado.
+function dataValida(valor) {
+    if (!valor || (typeof valor !== 'string' && !(valor instanceof Date))) return false;
+    const d = new Date(valor);
+    if (isNaN(d.getTime())) return false;
+    const ano = d.getUTCFullYear();
+    return ano >= 1900 && ano <= 2200;
+}
+
+// Valor monetário: número finito, não negativo, com no máximo 2 casas decimais
+// e dentro de um teto.
+//
+// A coluna `cobrancas.valor` é `numeric` SEM precisão (ilimitada), então o
+// banco aceitava alegremente 1e20 -- o QA de 07/08/2026 criou uma cobrança
+// nesse valor. Não é falha de segurança, mas num campo de dinheiro um zero a
+// mais digitado sem querer vira uma cobrança absurda pro associado, e nada no
+// caminho reclamava.
+function valorMonetarioValido(valor, maximo) {
+    const n = typeof valor === 'number' ? valor : parseFloat(valor);
+    if (!Number.isFinite(n) || n < 0) return false;
+    if (n > (maximo || 1000000)) return false;
+    // No máximo 2 casas decimais (é dinheiro, não medida). A folga de 1e-9
+    // absorve a imprecisão de ponto flutuante (10.99*100 não dá 1099 exato).
+    return Math.abs(n * 100 - Math.round(n * 100)) < 1e-9;
+}
+
 // Converte um parâmetro de query (?limite=, ?por_pagina=) em inteiro positivo
 // dentro de um teto, caindo no padrão quando o valor não presta.
 //
@@ -171,6 +210,9 @@ module.exports = {
     nomeValido,
     textoLivreValido,
     inteiroPositivo,
+    uuidValido,
+    dataValida,
+    valorMonetarioValido,
     senhaForte,
     gerarSenhaProvisoria,
     imagemBase64Valida,

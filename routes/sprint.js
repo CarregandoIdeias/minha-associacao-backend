@@ -5,7 +5,10 @@
 const express = require('express');
 const { autenticarSuperAdmin, comConexaoSuperAdmin } = require('../middleware/auth');
 
+const paramUuid = require('../middleware/paramUuid');
 const router = express.Router();
+// Rejeita :id que nao seja uuid com 400, em vez de deixar virar 500 no Postgres
+router.param('id', paramUuid);
 router.use(autenticarSuperAdmin);
 
 const TIPOS_VALIDOS = ['melhoria', 'bug'];

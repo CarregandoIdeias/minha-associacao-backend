@@ -35,7 +35,10 @@ const PAPEIS_SUPERADMIN_VALIDOS = ['super_admin', 'administrador', 'suporte'];
 // de qualquer cliente, recebendo a senha nova na resposta.
 const GESTAO = ['super_admin', 'administrador'];
 
+const paramUuid = require('../middleware/paramUuid');
 const router = express.Router();
+// Rejeita :id que nao seja uuid com 400, em vez de deixar virar 500 no Postgres
+router.param('id', paramUuid);
 const JWT_SECRET = config.jwtSecret;
 
 // Compara em tempo constante para não vazar, por timing, quantos caracteres

@@ -5,7 +5,10 @@ const { registrarAtividade } = require('../utils/atividadeLog');
 const { registrarLogAuditoria } = require('../utils/auditoria');
 const { gerarPdfLeituras } = require('../utils/exportarLeiturasComunicado');
 
+const paramUuid = require('../middleware/paramUuid');
 const router = express.Router();
+// Rejeita :id que nao seja uuid com 400, em vez de deixar virar 500 no Postgres
+router.param('id', paramUuid);
 router.use(autenticar);
 router.use(bloquearSenhaProvisoria);
 router.use(bloquearTrialExpirado);
