@@ -9,6 +9,7 @@ const express = require('express');
 const { autenticar, bloquearSenhaProvisoria, bloquearTrialExpirado, exigirPlano, autorizar, comConexaoTenant } = require('../middleware/auth');
 const { registrarLogAuditoria } = require('../utils/auditoria');
 const { gerarPdfLogs } = require('../utils/exportarLogs');
+const { inteiroPositivo } = require('../utils/validacao');
 
 const router = express.Router();
 router.use(autenticar);
@@ -55,7 +56,7 @@ router.get('/', autorizar('admin', 'diretoria', 'financeiro', 'atendimento', 'op
     try {
         const { where, valores } = construirFiltros(req.query, req.usuario.associacao_id);
         const direcao = ordenar === 'asc' ? 'ASC' : 'DESC';
-        const limite = Math.min(parseInt(por_pagina, 10) || 50, 200);
+        const limite = inteiroPositivo(por_pagina, 50, 200);
         const paginaAtual = Math.max(parseInt(pagina, 10) || 1, 1);
         const offset = (paginaAtual - 1) * limite;
 

@@ -53,8 +53,8 @@ async function autenticar(req, res, next) {
         const client = await comConexaoAuth();
         try {
             const resultado = await client.query(
-                `SELECT u.ativo, u.papel, u.nome, u.senha_alterada_em, a.ativo AS associacao_ativa,
-                        a.plano, a.trial_expira_em
+                `SELECT u.ativo, u.papel, u.nome, u.associacao_id, u.senha_alterada_em,
+                        a.ativo AS associacao_ativa, a.plano, a.trial_expira_em
                  FROM usuarios u
                  JOIN associacoes a ON a.id = u.associacao_id
                  WHERE u.id = $1`,
@@ -85,7 +85,23 @@ async function autenticar(req, res, next) {
             // trial valerem na hora (nome também usado pro snapshot em
             // atividades, ver utils/atividadeLog.js; plano/trial_expira_em usados
             // por bloquearTrialExpirado abaixo).
-            req.usuario = { ...payload, papel: usuario.papel, nome: usuario.nome, plano: usuario.plano, trial_expira_em: usuario.trial_expira_em };
+            //
+            // associacao_id TAMBÉM vem do banco desde a auditoria de 07/08/2026.
+            // Antes era o único campo do token que ficava valendo sem
+            // revalidação -- e é justamente a chave do isolamento entre tenants
+            // (vira o SET de RLS em comConexaoTenant e o `WHERE associacao_id`
+            // de toda query). Não era explorável (o token é assinado, ninguém
+            // forja esse valor), mas era o campo onde ficar desatualizado
+            // significaria uma associação enxergando dado de outra -- caro
+            // demais pra depender de "nada muda esse campo hoje".
+            req.usuario = {
+                ...payload,
+                associacao_id: usuario.associacao_id,
+                papel: usuario.papel,
+                nome: usuario.nome,
+                plano: usuario.plano,
+                trial_expira_em: usuario.trial_expira_em,
+            };
             return next();
         } catch (err) {
             if (tentativa === MAX_TENTATIVAS) {

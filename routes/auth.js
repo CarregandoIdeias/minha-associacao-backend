@@ -14,6 +14,13 @@ const { limiteLogin, limiteRedefinicao } = require('../middleware/rateLimiter');
 const router = express.Router();
 const JWT_SECRET = config.jwtSecret;
 
+// Hash descartável, só pra gastar o mesmo tempo de CPU quando o e-mail não
+// existe (ver POST /login). Sem isso o bcrypt.compare é simplesmente pulado
+// nesse caso e a resposta volta bem mais rápido -- essa diferença de tempo,
+// sozinha, já denuncia quais e-mails existem na plataforma. Calculado uma vez
+// na subida do processo; o valor em si nunca é usado pra autenticar nada.
+const HASH_INEXISTENTE = bcrypt.hashSync('usuario-inexistente-nunca-autentica', 10);
+
 function assinarToken(usuario) {
     return jwt.sign(
         {
@@ -60,28 +67,16 @@ router.post('/login', limiteLogin, async (req, res) => {
 
     try {
         if (!usuario || !usuario.ativo) {
+            // Compara contra um hash descartável só pra gastar o mesmo tempo
+            // de CPU do caminho normal (ver HASH_INEXISTENTE no topo) -- o
+            // resultado é ignorado de propósito.
+            await bcrypt.compare(senha, HASH_INEXISTENTE);
             await registrarEventoAuth(pool, { emailTentado: email, evento: 'login_falha', req });
             await registrarLogAuditoria(pool, {
                 usuarioEmail: email, modulo: 'autenticacao', tipoAcao: 'login',
                 descricao: 'tentativa de login falhou para ' + email, req,
             });
             return res.status(401).json({ erro: 'Credenciais inválidas' });
-        }
-
-        if (!usuario.associacao_ativa) {
-            await registrarEventoAuth(pool, {
-                usuarioId: usuario.id,
-                associacaoId: usuario.associacao_id,
-                emailTentado: email,
-                evento: 'login_falha',
-                req,
-            });
-            await registrarLogAuditoria(pool, {
-                associacaoId: usuario.associacao_id, usuarioId: usuario.id, usuarioNome: usuario.nome, usuarioEmail: email,
-                modulo: 'autenticacao', tipoAcao: 'login',
-                descricao: usuario.nome + ' tentou logar com a associação bloqueada', req,
-            });
-            return res.status(403).json({ erro: 'O acesso da sua associação está temporariamente bloqueado. Fale com o suporte.' });
         }
 
         const senhaCorreta = await bcrypt.compare(senha, usuario.senha_hash);
@@ -99,6 +94,29 @@ router.post('/login', limiteLogin, async (req, res) => {
                 descricao: 'tentativa de login com senha incorreta para ' + usuario.nome, req,
             });
             return res.status(401).json({ erro: 'Credenciais inválidas' });
+        }
+
+        // Só DEPOIS de confirmar a senha é que contamos que a associação está
+        // bloqueada (auditoria de 07/08/2026). Essa checagem vinha antes do
+        // bcrypt.compare, então a mensagem específica -- diferente do 401
+        // genérico -- respondia a quem só tivesse o e-mail, confirmando de
+        // graça que ele existe na plataforma e a qual situação pertence.
+        // Quem acertou a senha é o dono da conta e merece a mensagem útil;
+        // quem não acertou recebe o mesmo 401 de sempre.
+        if (!usuario.associacao_ativa) {
+            await registrarEventoAuth(pool, {
+                usuarioId: usuario.id,
+                associacaoId: usuario.associacao_id,
+                emailTentado: email,
+                evento: 'login_falha',
+                req,
+            });
+            await registrarLogAuditoria(pool, {
+                associacaoId: usuario.associacao_id, usuarioId: usuario.id, usuarioNome: usuario.nome, usuarioEmail: email,
+                modulo: 'autenticacao', tipoAcao: 'login',
+                descricao: usuario.nome + ' tentou logar com a associação bloqueada', req,
+            });
+            return res.status(403).json({ erro: 'O acesso da sua associação está temporariamente bloqueado. Fale com o suporte.' });
         }
 
         const token = assinarToken(usuario);

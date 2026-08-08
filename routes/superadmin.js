@@ -7,7 +7,7 @@ const pool = require('../db');
 const config = require('../config/env');
 const { autenticarSuperAdmin, autorizarSuperAdmin, comConexaoSuperAdmin } = require('../middleware/auth');
 const { limiteLogin } = require('../middleware/rateLimiter');
-const { emailValido, gerarSenhaProvisoria, cpfValido, senhaForte, imagemBase64Valida } = require('../utils/validacao');
+const { emailValido, gerarSenhaProvisoria, cpfValido, senhaForte, imagemBase64Valida, inteiroPositivo } = require('../utils/validacao');
 const { registrarEventoAuth } = require('../utils/authLog');
 const { registrarLogAuditoria } = require('../utils/auditoria');
 const { calcularValorMensalidade, statusAssinatura } = require('../utils/precos');
@@ -155,7 +155,7 @@ router.use(autenticarSuperAdmin);
 // GET /superadmin/admins — lista os administradores da plataforma
 router.get('/admins', autorizarSuperAdmin('super_admin'), async (req, res) => {
     try {
-        const limite = Math.min(parseInt(req.query.limite, 10) || 100, 1000);
+        const limite = inteiroPositivo(req.query.limite, 100, 1000);
         const resultado = await pool.query(
             `SELECT id, nome, email, papel, ativo, criado_em FROM super_admins ORDER BY criado_em DESC LIMIT $1`,
             [limite]
@@ -413,7 +413,7 @@ router.get('/associacoes', async (req, res) => {
         if (status === 'inativo') condicoes.push(`a.ativo = false`);
 
         const where = condicoes.length ? `WHERE ${condicoes.join(' AND ')}` : '';
-        const limiteSql = limite ? `LIMIT ${Math.min(parseInt(limite, 10), 1000)}` : '';
+        const limiteSql = limite ? `LIMIT ${inteiroPositivo(limite, 100, 1000)}` : '';
 
         const resultado = await client.query(`
             SELECT a.id, a.nome, a.tipo, a.email, a.telefone, a.endereco, a.cidade, a.estado, a.cep, a.site, a.cnpj,
@@ -991,8 +991,8 @@ router.get('/logs', async (req, res) => {
         // senão, usa paginação normal com por_pagina/pagina.
         const usandoLimiteSimples = limiteQuery && !pagina && !por_pagina;
         const limite = usandoLimiteSimples
-            ? Math.min(parseInt(limiteQuery, 10), 100)
-            : Math.min(parseInt(por_pagina, 10) || 50, 200);
+            ? inteiroPositivo(limiteQuery, 100, 100)
+            : inteiroPositivo(por_pagina, 50, 200);
         const paginaAtual = usandoLimiteSimples ? 1 : Math.max(parseInt(pagina, 10) || 1, 1);
         const offset = (paginaAtual - 1) * limite;
 

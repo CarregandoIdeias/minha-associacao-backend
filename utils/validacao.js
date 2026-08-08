@@ -48,6 +48,22 @@ function nomeValido(nome) {
     return true;
 }
 
+// Converte um parâmetro de query (?limite=, ?por_pagina=) em inteiro positivo
+// dentro de um teto, caindo no padrão quando o valor não presta.
+//
+// Achado na auditoria de 07/08/2026: `Math.min(parseInt(x, 10), N)` sozinho
+// devolve NaN pra texto ("abc") e passa negativo adiante ("-5"), e esses
+// valores chegavam a virar `LIMIT NaN` / `LIMIT -5` no SQL -- erro do Postgres
+// e 500 na cara do usuário. Nunca foi injeção (parseInt come qualquer coisa
+// depois do número, e a maioria dos pontos já era parametrizada), mas era erro
+// exposto sem necessidade. O `|| padrao` que alguns pontos tinham cobria o NaN
+// e o zero, mas não o negativo.
+function inteiroPositivo(valor, padrao, maximo) {
+    const n = parseInt(valor, 10);
+    if (!Number.isFinite(n) || n < 1) return padrao;
+    return Math.min(n, maximo);
+}
+
 // Valida campo de texto livre longo (observação do associado, etc.). Achado na
 // auditoria de 07/08/2026: `observacao` não tinha validação NENHUMA e a coluna
 // é `text` (sem teto) no Postgres -- dava pra gravar megabytes por associado, e
@@ -154,6 +170,7 @@ module.exports = {
     emailValido,
     nomeValido,
     textoLivreValido,
+    inteiroPositivo,
     senhaForte,
     gerarSenhaProvisoria,
     imagemBase64Valida,

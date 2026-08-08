@@ -4,6 +4,92 @@ Contexto rápido para sessões de IA trabalhando neste repositório. Para o
 quadro completo (rotas, modelo de dados, roadmap), ver `README.md`. Para
 tudo sobre migrações e RLS, ver `supabase/README.md`.
 
+## Auditoria de segurança pré-cliente — XSS por quebra de atributo + 3 itens baixos (07/08/2026)
+
+Pedida pelo usuário ao fechar o **primeiro cliente real** ("não posso
+sofrer com isso depois que tiver cliente ativo"). Revisão do código de
+verdade, não releitura das auditorias anteriores. `npm audit` limpo
+(0 vulnerabilidades), zero SQL injection (todas as queries dinâmicas usam
+`$N`; `ORDER BY` é ternário com literal), isolamento por tenant
+consistente (`WHERE id = $1 AND associacao_id = $2` + RLS). As duas
+pendências de XSS de 29/07 (`/atividades`, `cidade`/`estado`) já estavam
+corrigidas.
+
+**Achado principal — XSS armazenado com escalação de privilégio, real e
+confirmado executando código.** O `escapeHtml` do painel usava
+`textContent -> innerHTML`, que escapa `<`, `>` e `&` mas **deixa aspas
+passarem intactas**. Seguro em contexto de texto (a maioria dos usos), mas
+não dentro de atributo — e `observacao` do associado ia pra `title="..."`
+em `index.html`. Cadeia completa: `observacao` **sem validação nenhuma**
+aqui no backend, coluna `text` sem teto, gravável por
+`admin`/`diretoria`/**`atendimento`**/**`operador`**, renderizada pra
+todos os papéis (inclusive `admin`), com o JWT no `localStorage`. Um
+`atendimento`/`operador` — que por desenho não pode tocar em Usuários nem
+Configurações — gravava `x" onmouseover="..."`, o admin abria a lista de
+Associados e o script rodava na sessão dele. **Derrotava exatamente os
+perfis granulares de 28/07.** Corrigido em duas camadas (mesmo princípio
+do XSS de 27/07): `escapeHtml` passou a escapar aspas (ver
+`painel/CLAUDE.md` — conserta todos os contextos de atributo de uma vez,
+inclusive os que só estavam seguros por sorte) e `textoLivreValido()` novo
+em `utils/validacao.js`, aplicado a `observacao` no `POST`/`PUT
+/associados` (teto de 2000 caracteres, barra caracteres de controle,
+**permite aspas de propósito** — são legítimas em texto livre, a defesa
+contra XSS é o escape na renderização).
+
+**Confirmado em navegador de verdade antes e depois**, com o flag resetado
+a cada caso: no código antigo o `<span>` saía com
+`title+onmouseover+a+style` e o handler **executava**; no novo sai só
+`title+style` e o payload vira texto literal do `title`.
+
+**Os 3 de severidade baixa, também corrigidos na mesma rodada:**
+
+1. **`associacao_id` vinha do token sem revalidação** (`middleware/auth.js`,
+   `autenticar()`). `papel`/`nome`/`plano`/`trial_expira_em` já vinham
+   frescos do banco desde 25-29/07, mas `associacao_id` não — e é
+   justamente a chave do isolamento entre tenants (vira o `SET` de RLS em
+   `comConexaoTenant` e o `WHERE associacao_id` de toda query). Não era
+   explorável (o token é assinado, ninguém forja o valor), mas era o
+   único campo onde ficar desatualizado significaria uma associação
+   enxergando dado de outra. Agora `u.associacao_id` entra no `SELECT` da
+   revalidação e sobrescreve o do payload. **Testado de forma direta**:
+   usuário logado em A, `UPDATE usuarios SET associacao_id = B` no banco
+   sem reemitir token, e o **mesmo token** passou a enxergar os dados de B
+   (antes continuaria em A).
+
+2. **Enumeração de usuário no login** (`routes/auth.js`). A checagem de
+   `associacao_ativa` vinha **antes** do `bcrypt.compare`, então a
+   mensagem específica de "associação bloqueada" (403, diferente do 401
+   genérico) respondia a quem tivesse só o e-mail, confirmando de graça
+   que ele existe. Movida pra **depois** da senha conferida: quem acertou
+   a senha é o dono da conta e recebe a mensagem útil; quem não acertou
+   recebe o mesmo 401 de sempre. Junto disso, `HASH_INEXISTENTE`
+   (calculado uma vez na subida) faz um `bcrypt.compare` descartável
+   quando o e-mail não existe — sem isso o compare era pulado e a resposta
+   voltava bem mais rápido, e essa diferença de tempo sozinha já denunciava
+   quais e-mails existem.
+
+3. **`LIMIT` com valor inválido virava 500.** `Math.min(parseInt(x, 10), N)`
+   devolve `NaN` pra texto e passa negativo adiante, chegando a `LIMIT
+   NaN`/`LIMIT -5` no SQL. Nunca foi injeção (o `parseInt` come qualquer
+   coisa depois do número, e a maioria dos pontos já era parametrizada),
+   mas era erro exposto sem necessidade — e o `|| padrao` que alguns
+   pontos tinham cobria `NaN` e zero, **não o negativo**. Novo
+   `inteiroPositivo(valor, padrao, maximo)` em `utils/validacao.js`,
+   aplicado nos 7 pontos que alimentam `LIMIT` (`associados`, `auditoria`,
+   `cobrancas` e 4 em `superadmin`).
+
+**Testado contra staging** com associações/usuários de teste criados e
+apagados via `comConexaoSuperAdmin()` (13 casos unitários da validação de
+texto + 10 do `inteiroPositivo` + 8 E2E da `observacao` + 10 E2E dos 3
+itens). Verificado depois no ambiente de staging já publicado (Vercel com
+o `escapeHtml` novo, Render rejeitando observação de 2001 caracteres).
+
+**Fica registrado pra não repetir:** `escapeHtml` **não** é seguro em
+atributo se alguém reverter pra `textContent -> innerHTML`. Os usos em
+`class="badge ..."` dependem hoje de `status` ser enum no banco + whitelist
+na rota — se um dia um campo livre for pra um atributo, vira XSS
+silenciosamente de novo.
+
 ## O que é
 
 API multi-tenant (Node/Express + Postgres/Supabase) para gestão de

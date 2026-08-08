@@ -3,7 +3,7 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const { autenticar, bloquearSenhaProvisoria, bloquearTrialExpirado, autorizar, comConexaoTenant } = require('../middleware/auth');
-const { cpfValido, emailValido, gerarSenhaProvisoria, textoLivreValido } = require('../utils/validacao');
+const { cpfValido, emailValido, gerarSenhaProvisoria, textoLivreValido, inteiroPositivo } = require('../utils/validacao');
 const { registrarEventoAuth } = require('../utils/authLog');
 const { registrarAtividade } = require('../utils/atividadeLog');
 const { registrarLogAuditoria } = require('../utils/auditoria');
@@ -41,7 +41,7 @@ router.get('/', autorizar('admin', 'diretoria', 'financeiro', 'atendimento', 'op
             return res.json(resultado.rows);
         }
 
-        const limite = Math.min(parseInt(por_pagina, 10) || 50, 200);
+        const limite = inteiroPositivo(por_pagina, 50, 200);
         const paginaAtual = Math.max(parseInt(pagina, 10) || 1, 1);
         const offset = (paginaAtual - 1) * limite;
 
