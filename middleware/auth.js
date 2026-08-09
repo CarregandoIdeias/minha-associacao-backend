@@ -314,7 +314,10 @@ async function autenticarSuperAdmin(req, res, next) {
     const MAX_TENTATIVAS = 3;
     for (let tentativa = 1; tentativa <= MAX_TENTATIVAS; tentativa++) {
         try {
-            const resultado = await pool.query(
+            // queryNeutra (não pool.query) desde SEC-016 -- super_admins não
+            // tem RLS, mas o invariante "toda conexão declara as três flags"
+            // vale sem exceção agora, sem ninguém precisar lembrar por quê.
+            const resultado = await queryNeutra(
                 `SELECT nome, papel, ativo, deve_trocar_senha, senha_alterada_em, sessoes_invalidas_antes_de
                  FROM super_admins WHERE id = $1`,
                 [payload.id]
@@ -390,6 +393,44 @@ async function comConexaoAuth() {
     return comConexaoComSessao(sql, valores);
 }
 
+// Abre uma conexão SEM tenant e SEM nenhum bypass -- as três flags zeradas.
+// Para queries que legitimamente não pertencem a tenant nenhum: `super_admins`
+// (tabela sem RLS), leitura de `configuracoes_plataforma` (policy `USING
+// (true)`) e a gravação dos logs (`WITH CHECK (true)`).
+//
+// Auditoria de segurança Fase 4, 08/08/2026 (SEC-016): esses pontos usavam
+// `pool.query()` direto, que **não passa pelo sqlSessao()** -- ou seja,
+// rodavam com o GUC que a requisição anterior tivesse deixado na conexão
+// física (o pool reaproveita, e `release()` não limpa nada). Nunca houve
+// risco real, porque nenhuma dessas queries toca tabela com isolamento por
+// tenant. Mas o invariante "toda conexão declara as três flags" tinha esse
+// furo, e uma rota nova que usasse `pool.query` numa tabela de tenant
+// herdaria estado alheio -- exatamente a classe de bug do incidente de
+// 07/08 (ver seção "RLS estava desligado na prática" no CLAUDE.md).
+async function comConexaoSemTenant() {
+    const { sql, valores } = sqlSessao({});
+    return comConexaoComSessao(sql, valores);
+}
+
+// Mesma assinatura de `pool.query(sql, valores)`, mas numa conexão com as
+// flags zeradas -- e cuidando do release sozinha. É o que permite a troca
+// nos ~20 pontos ser um rename mecânico (`pool.query(` ->
+// `conexaoNeutra.query(`), sem reestruturar try/finally em cada um, que é
+// justamente onde uma conversão manual vazaria conexão.
+async function queryNeutra(sql, valores) {
+    const client = await comConexaoSemTenant();
+    try {
+        return await client.query(sql, valores);
+    } finally {
+        client.release();
+    }
+}
+
+// Objeto com a mesma forma de um client do pg (só `.query`), pra poder ser
+// passado onde os helpers de log esperam receber uma conexão
+// (registrarLogAuditoria/registrarEventoAuth).
+const conexaoNeutra = { query: queryNeutra };
+
 module.exports = {
     autenticar,
     bloquearSenhaProvisoria,
@@ -402,4 +443,6 @@ module.exports = {
     autorizarSuperAdmin,
     comConexaoSuperAdmin,
     comConexaoAuth,
+    comConexaoSemTenant,
+    conexaoNeutra,
 };

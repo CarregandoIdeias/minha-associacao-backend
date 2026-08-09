@@ -3,11 +3,14 @@ const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
-const pool = require('../db');
 const config = require('../config/env');
-const { autenticarSuperAdmin, autorizarSuperAdmin, comConexaoSuperAdmin } = require('../middleware/auth');
+// `pool` não é mais importado aqui de propósito (SEC-016, 08/08/2026): toda
+// query que não pertence a tenant nenhum passa por `conexaoNeutra`, que
+// declara as três flags de sessão. Sem o import, não dá pra voltar a usar
+// `pool.query` direto sem perceber.
+const { autenticarSuperAdmin, autorizarSuperAdmin, comConexaoSuperAdmin, conexaoNeutra } = require('../middleware/auth');
 const { limiteLogin, limiteLoginPorConta, limiteExportacao, limiteUpload, limiteBootstrap } = require('../middleware/rateLimiter');
-const { emailValido, gerarSenhaProvisoria, cpfValido, senhaForte, imagemBase64Valida, inteiroPositivo, textoLivreValido, dataValida } = require('../utils/validacao');
+const { emailValido, gerarSenhaProvisoria, cpfValido, senhaForte, imagemBase64Valida, inteiroPositivo, textoLivreValido, dataValida, CUSTO_BCRYPT } = require('../utils/validacao');
 const { registrarEventoAuth } = require('../utils/authLog');
 const { registrarLogAuditoria } = require('../utils/auditoria');
 const { calcularValorMensalidade, statusAssinatura } = require('../utils/precos');
@@ -68,14 +71,15 @@ function segredoValido(recebido, esperado) {
 // super-admin existem na plataforma. Constante local a este arquivo (não
 // compartilhada com auth.js), mesmo padrão de constantes por arquivo já
 // usado no projeto.
-const HASH_INEXISTENTE_SUPERADMIN = bcrypt.hashSync('superadmin-inexistente-nunca-autentica', 10);
+const HASH_INEXISTENTE_SUPERADMIN = bcrypt.hashSync('superadmin-inexistente-nunca-autentica', CUSTO_BCRYPT);
 
 // POST /superadmin/bootstrap
 // Cria o PRIMEIRO super-admin. Além de só funcionar se ainda não existir
 // nenhum (autodesabilita depois do primeiro uso), exige o segredo de setup
 // definido em BOOTSTRAP_SECRET — sem isso, quem descobrisse essa rota antes
 // de você rodar o bootstrap se tornaria dono da plataforma inteira.
-// super_admins não tem RLS, então pool.query direto é seguro aqui.
+// super_admins não tem RLS -- mesmo assim usa conexaoNeutra (SEC-016), pra
+// nenhuma query do projeto rodar com estado de sessão herdado.
 //
 // limiteBootstrap (auditoria de segurança Fase 2, 08/08/2026 -- SEC-012):
 // essa rota dá acesso total à plataforma pra quem acertar o
@@ -105,13 +109,13 @@ router.post('/bootstrap', limiteBootstrap, async (req, res) => {
     }
 
     try {
-        const existentes = await pool.query(`SELECT id FROM super_admins LIMIT 1`);
+        const existentes = await conexaoNeutra.query(`SELECT id FROM super_admins LIMIT 1`);
         if (existentes.rows.length > 0) {
             return res.status(403).json({ erro: 'Já existe um super-admin cadastrado. Use /superadmin/login.' });
         }
 
-        const senhaHash = await bcrypt.hash(senha, 10);
-        const resultado = await pool.query(
+        const senhaHash = await bcrypt.hash(senha, CUSTO_BCRYPT);
+        const resultado = await conexaoNeutra.query(
             `INSERT INTO super_admins (nome, email, senha_hash) VALUES ($1, $2, $3) RETURNING id, nome, email`,
             [nome, email, senhaHash]
         );
@@ -140,7 +144,7 @@ router.post('/login', limiteLogin, limiteLoginPorConta, async (req, res) => {
         // SEC-011/SEC-024): antes era case-sensitive, inconsistente com
         // /auth/login (que já usa lower(email) desde a migration de login
         // por e-mail).
-        const resultado = await pool.query(
+        const resultado = await conexaoNeutra.query(
             `SELECT id, nome, email, senha_hash, papel, ativo, deve_trocar_senha FROM super_admins WHERE lower(email) = lower($1)`,
             [email]
         );
@@ -154,7 +158,7 @@ router.post('/login', limiteLogin, limiteLoginPorConta, async (req, res) => {
             // diferença de tempo sozinha já denuncia quais e-mails de
             // super-admin existem na plataforma.
             await bcrypt.compare(senha, HASH_INEXISTENTE_SUPERADMIN);
-            await registrarLogAuditoria(pool, {
+            await registrarLogAuditoria(conexaoNeutra, {
                 superAdminEmail: email, modulo: 'autenticacao', tipoAcao: 'login',
                 descricao: 'tentativa de login de super-admin falhou para ' + email, req,
             });
@@ -163,7 +167,7 @@ router.post('/login', limiteLogin, limiteLoginPorConta, async (req, res) => {
 
         const senhaCorreta = await bcrypt.compare(senha, admin.senha_hash);
         if (!senhaCorreta) {
-            await registrarLogAuditoria(pool, {
+            await registrarLogAuditoria(conexaoNeutra, {
                 superAdminId: admin.id, superAdminNome: admin.nome, superAdminEmail: admin.email,
                 modulo: 'autenticacao', tipoAcao: 'login',
                 descricao: 'tentativa de login com senha incorreta para ' + admin.nome, req,
@@ -177,7 +181,7 @@ router.post('/login', limiteLogin, limiteLoginPorConta, async (req, res) => {
             { expiresIn: '8h' }
         );
 
-        await registrarLogAuditoria(pool, {
+        await registrarLogAuditoria(conexaoNeutra, {
             superAdminId: admin.id, superAdminNome: admin.nome, superAdminEmail: admin.email,
             modulo: 'autenticacao', tipoAcao: 'login',
             descricao: admin.nome + ' (super-admin) realizou login', req,
@@ -205,14 +209,14 @@ router.use(autenticarSuperAdmin);
 // válido até expirar (até 8h) mesmo depois de clicar em "Sair". Mesmo
 // mecanismo de POST /auth/logout (sessoes_invalidas_antes_de comparado
 // com o iat do token em autenticarSuperAdmin, middleware/auth.js).
-// super_admins não tem RLS, pool.query direto é seguro aqui.
+// super_admins não tem RLS -- mesmo assim usa conexaoNeutra (SEC-016).
 router.post('/logout', async (req, res) => {
     try {
-        await pool.query(
+        await conexaoNeutra.query(
             `UPDATE super_admins SET sessoes_invalidas_antes_de = now() WHERE id = $1`,
             [req.superAdmin.id]
         );
-        await registrarLogAuditoria(pool, {
+        await registrarLogAuditoria(conexaoNeutra, {
             superAdminId: req.superAdmin.id, superAdminNome: req.superAdmin.nome, superAdminEmail: req.superAdmin.email,
             modulo: 'autenticacao', tipoAcao: 'logout',
             descricao: req.superAdmin.nome + ' (super-admin) realizou logout', req,
@@ -232,7 +236,7 @@ router.post('/logout', async (req, res) => {
 router.get('/admins', autorizarSuperAdmin('super_admin'), async (req, res) => {
     try {
         const limite = inteiroPositivo(req.query.limite, 100, 1000);
-        const resultado = await pool.query(
+        const resultado = await conexaoNeutra.query(
             `SELECT id, nome, email, papel, ativo, criado_em FROM super_admins ORDER BY criado_em DESC LIMIT $1`,
             [limite]
         );
@@ -260,15 +264,15 @@ router.post('/admins', autorizarSuperAdmin('super_admin'), async (req, res) => {
     }
 
     const senhaProvisoria = gerarSenhaProvisoria();
-    const senhaHash = await bcrypt.hash(senhaProvisoria, 10);
+    const senhaHash = await bcrypt.hash(senhaProvisoria, CUSTO_BCRYPT);
 
     try {
-        const resultado = await pool.query(
+        const resultado = await conexaoNeutra.query(
             `INSERT INTO super_admins (nome, email, senha_hash, papel, deve_trocar_senha)
              VALUES ($1, $2, $3, $4, true) RETURNING id, nome, email, papel, ativo, criado_em`,
             [nome.trim(), email, senhaHash, papel || 'administrador']
         );
-        await registrarLogAuditoria(pool, {
+        await registrarLogAuditoria(conexaoNeutra, {
             superAdminId: req.superAdmin.id, superAdminNome: req.superAdmin.nome, superAdminEmail: req.superAdmin.email,
             modulo: 'administradores', tipoAcao: 'criacao',
             descricao: req.superAdmin.nome + ' criou o administrador ' + resultado.rows[0].nome + ' (' + resultado.rows[0].papel + ')',
@@ -303,19 +307,19 @@ router.put('/admins/:id', autorizarSuperAdmin('super_admin'), async (req, res) =
     }
 
     try {
-        const anterior = await pool.query(`SELECT id, nome, email, papel FROM super_admins WHERE id = $1`, [id]);
+        const anterior = await conexaoNeutra.query(`SELECT id, nome, email, papel FROM super_admins WHERE id = $1`, [id]);
         if (anterior.rows.length === 0) {
             return res.status(404).json({ erro: 'Administrador não encontrado' });
         }
 
-        const resultado = await pool.query(
+        const resultado = await conexaoNeutra.query(
             `UPDATE super_admins SET nome = $1, email = COALESCE($2, email), papel = COALESCE($3, papel)
              WHERE id = $4 RETURNING id, nome, email, papel, ativo, criado_em`,
             [nome.trim(), email || null, papel || null, id]
         );
 
         const mudouPapel = papel && papel !== anterior.rows[0].papel;
-        await registrarLogAuditoria(pool, {
+        await registrarLogAuditoria(conexaoNeutra, {
             superAdminId: req.superAdmin.id, superAdminNome: req.superAdmin.nome, superAdminEmail: req.superAdmin.email,
             modulo: 'administradores', tipoAcao: mudouPapel ? 'alteracao_permissoes' : 'edicao',
             descricao: req.superAdmin.nome + ' editou o administrador ' + resultado.rows[0].nome,
@@ -348,12 +352,12 @@ router.patch('/admins/:id/status', autorizarSuperAdmin('super_admin'), async (re
 
     try {
         if (!ativo) {
-            const alvo = await pool.query(`SELECT papel FROM super_admins WHERE id = $1`, [id]);
+            const alvo = await conexaoNeutra.query(`SELECT papel FROM super_admins WHERE id = $1`, [id]);
             if (alvo.rows.length === 0) {
                 return res.status(404).json({ erro: 'Administrador não encontrado' });
             }
             if (alvo.rows[0].papel === 'super_admin') {
-                const restantes = await pool.query(
+                const restantes = await conexaoNeutra.query(
                     `SELECT COUNT(*) AS total FROM super_admins WHERE papel = 'super_admin' AND ativo = true AND id != $1`,
                     [id]
                 );
@@ -363,11 +367,11 @@ router.patch('/admins/:id/status', autorizarSuperAdmin('super_admin'), async (re
             }
         }
 
-        const resultado = await pool.query(
+        const resultado = await conexaoNeutra.query(
             `UPDATE super_admins SET ativo = $1 WHERE id = $2 RETURNING id, nome, email, papel, ativo`,
             [ativo, id]
         );
-        await registrarLogAuditoria(pool, {
+        await registrarLogAuditoria(conexaoNeutra, {
             superAdminId: req.superAdmin.id, superAdminNome: req.superAdmin.nome, superAdminEmail: req.superAdmin.email,
             modulo: 'administradores', tipoAcao: 'edicao',
             descricao: req.superAdmin.nome + ' ' + (ativo ? 'ativou' : 'desativou') + ' o administrador ' + resultado.rows[0].nome,
@@ -386,17 +390,17 @@ router.patch('/admins/:id/status', autorizarSuperAdmin('super_admin'), async (re
 router.patch('/admins/:id/senha', autorizarSuperAdmin('super_admin'), async (req, res) => {
     const { id } = req.params;
     const senhaProvisoria = gerarSenhaProvisoria();
-    const senhaHash = await bcrypt.hash(senhaProvisoria, 10);
+    const senhaHash = await bcrypt.hash(senhaProvisoria, CUSTO_BCRYPT);
 
     try {
-        const resultado = await pool.query(
+        const resultado = await conexaoNeutra.query(
             `UPDATE super_admins SET senha_hash = $1, deve_trocar_senha = true, senha_alterada_em = now() WHERE id = $2 RETURNING id, nome, email`,
             [senhaHash, id]
         );
         if (resultado.rows.length === 0) {
             return res.status(404).json({ erro: 'Administrador não encontrado' });
         }
-        await registrarLogAuditoria(pool, {
+        await registrarLogAuditoria(conexaoNeutra, {
             superAdminId: req.superAdmin.id, superAdminNome: req.superAdmin.nome, superAdminEmail: req.superAdmin.email,
             modulo: 'administradores', tipoAcao: 'alteracao_senha',
             descricao: req.superAdmin.nome + ' redefiniu a senha do administrador ' + resultado.rows[0].nome,
@@ -422,7 +426,7 @@ router.put('/perfil/senha', async (req, res) => {
     }
 
     try {
-        const resultado = await pool.query(`SELECT senha_hash FROM super_admins WHERE id = $1`, [req.superAdmin.id]);
+        const resultado = await conexaoNeutra.query(`SELECT senha_hash FROM super_admins WHERE id = $1`, [req.superAdmin.id]);
         const admin = resultado.rows[0];
         if (!admin) {
             return res.status(404).json({ erro: 'Administrador não encontrado' });
@@ -433,12 +437,12 @@ router.put('/perfil/senha', async (req, res) => {
             return res.status(401).json({ erro: 'Senha atual incorreta' });
         }
 
-        const novoHash = await bcrypt.hash(senha_nova, 10);
-        await pool.query(
+        const novoHash = await bcrypt.hash(senha_nova, CUSTO_BCRYPT);
+        await conexaoNeutra.query(
             `UPDATE super_admins SET senha_hash = $1, deve_trocar_senha = false, senha_alterada_em = now() WHERE id = $2`,
             [novoHash, req.superAdmin.id]
         );
-        await registrarLogAuditoria(pool, {
+        await registrarLogAuditoria(conexaoNeutra, {
             superAdminId: req.superAdmin.id, superAdminNome: req.superAdmin.nome, superAdminEmail: req.superAdmin.email,
             modulo: 'administradores', tipoAcao: 'alteracao_senha',
             descricao: req.superAdmin.nome + ' alterou a própria senha', req,
@@ -660,7 +664,7 @@ router.patch('/associacoes/:id/resetar-senha-admin', autorizarSuperAdmin(...GEST
     const { id } = req.params;
 
     const senhaProvisoria = gerarSenhaProvisoria();
-    const senhaHash = await bcrypt.hash(senhaProvisoria, 10);
+    const senhaHash = await bcrypt.hash(senhaProvisoria, CUSTO_BCRYPT);
 
     const client = await comConexaoSuperAdmin();
     try {
@@ -869,7 +873,7 @@ router.post('/associacoes', autorizarSuperAdmin(...GESTAO), limiteUpload, async 
     // Gerado/hasheado antes de pegar a conexão -- ver comentário equivalente
     // em routes/associados.js (POST /).
     const senhaProvisoria = gerarSenhaProvisoria();
-    const senhaHash = await bcrypt.hash(senhaProvisoria, 10);
+    const senhaHash = await bcrypt.hash(senhaProvisoria, CUSTO_BCRYPT);
 
     const client = await comConexaoSuperAdmin();
     try {
@@ -1383,7 +1387,7 @@ router.patch('/solicitacoes-plano/:id/rejeitar', autorizarSuperAdmin(...GESTAO),
 
 router.get('/configuracoes-plataforma', autorizarSuperAdmin('super_admin'), async (req, res) => {
     try {
-        const resultado = await pool.query(
+        const resultado = await conexaoNeutra.query(
             `SELECT chave_pix, nome_recebedor_pix, cidade_pix FROM configuracoes_plataforma WHERE id = true`
         );
         res.json(resultado.rows[0] || {});

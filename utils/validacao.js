@@ -166,6 +166,26 @@ function comprovanteBase64Valido(valor) {
     return dataUrlValido(valor, MIMES_IMAGEM.concat([MIME_PDF]));
 }
 
+// Custo (work factor) do bcrypt em TODO hash gerado no projeto -- auditoria
+// de segurança Fase 4, 08/08/2026 (SEC-027). Era `10` literal, repetido em
+// 13 pontos; virou constante única pra não dessincronizar.
+//
+// Por que 11 e não 12 (que o relatório sugeria): o projeto usa `bcryptjs`
+// (JS puro, não o binding nativo). Medido nesta máquina: custo 10 ~90ms,
+// 11 ~165ms, 12 ~300ms por hash/compare. Numa instância pequena do Render,
+// single-thread, atendendo todo o resto, 12 vira facilmente 600ms+ por
+// login. 11 dobra o trabalho de um atacante offline (que é o ponto de
+// aumentar o custo) sem esse pedágio.
+//
+// IMPORTANTE -- hashes já gravados continuam no custo com que foram
+// criados (o bcrypt guarda o custo dentro do próprio hash), então mudar
+// aqui não invalida nem reprocessa nada; vale só para hashes novos.
+// Por isso os dois HASH_INEXISTENTE (routes/auth.js, routes/superadmin.js)
+// TÊM que usar esta mesma constante: eles existem pra gastar o mesmo tempo
+// de CPU do caminho normal (defesa de enumeração por timing, SEC-011) --
+// num custo diferente dos hashes reais, a diferença de tempo volta.
+const CUSTO_BCRYPT = 11;
+
 // Política de senha forte: mínimo 8 caracteres, com ao menos uma maiúscula,
 // uma minúscula e um número. Usada em toda troca de senha feita pelo próprio
 // usuário (primeiro acesso obrigatório e troca voluntária).
@@ -205,6 +225,7 @@ function gerarSenhaProvisoria() {
 }
 
 module.exports = {
+    CUSTO_BCRYPT,
     cpfValido,
     emailValido,
     nomeValido,
