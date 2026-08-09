@@ -3,7 +3,7 @@ const express = require('express');
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 const { autenticar, bloquearSenhaProvisoria, bloquearTrialExpirado, bloquearAssinaturaVencida, autorizar, comConexaoTenant } = require('../middleware/auth');
-const { emailValido, nomeValido, gerarSenhaProvisoria } = require('../utils/validacao');
+const { emailValido, nomeValido, gerarSenhaProvisoria, CUSTO_BCRYPT } = require('../utils/validacao');
 const { planoAtendeNivel } = require('../utils/precos');
 
 // Perfis de acesso granulares (item 5 do backlog, 28/07/2026) são
@@ -81,7 +81,7 @@ router.post('/', autorizar('admin'), async (req, res) => {
     // Gerado/hasheado antes de pegar a conexão -- ver mesmo comentário em
     // routes/associados.js (POST /).
     const senhaProvisoria = gerarSenhaProvisoria();
-    const senhaHash = await bcrypt.hash(senhaProvisoria, 10);
+    const senhaHash = await bcrypt.hash(senhaProvisoria, CUSTO_BCRYPT);
 
     const client = await comConexaoTenant(req.usuario.associacao_id);
     try {
@@ -285,7 +285,7 @@ router.patch('/:id/redefinir-senha', autorizar('admin'), async (req, res) => {
     // Gerado/hasheado fora da conexão do pool -- ver comentário equivalente
     // em routes/associados.js (POST /).
     const senhaProvisoria = gerarSenhaProvisoria();
-    const senhaHash = await bcrypt.hash(senhaProvisoria, 10);
+    const senhaHash = await bcrypt.hash(senhaProvisoria, CUSTO_BCRYPT);
 
     const client = await comConexaoTenant(req.usuario.associacao_id);
     try {

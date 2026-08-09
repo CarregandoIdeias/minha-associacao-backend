@@ -3,7 +3,7 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const { autenticar, bloquearSenhaProvisoria, bloquearTrialExpirado, bloquearAssinaturaVencida, autorizar, comConexaoTenant } = require('../middleware/auth');
-const { cpfValido, emailValido, gerarSenhaProvisoria, textoLivreValido, inteiroPositivo, nomeValido } = require('../utils/validacao');
+const { cpfValido, emailValido, gerarSenhaProvisoria, textoLivreValido, inteiroPositivo, nomeValido, CUSTO_BCRYPT } = require('../utils/validacao');
 const { registrarEventoAuth } = require('../utils/authLog');
 const { registrarAtividade } = require('../utils/atividadeLog');
 const { registrarLogAuditoria } = require('../utils/auditoria');
@@ -133,7 +133,7 @@ router.post('/', autorizar('admin', 'diretoria', 'atendimento', 'operador'), asy
     // com uma conexão do pool já emprestada (e uma transação já aberta)
     // seguraria essa conexão por mais tempo que o necessário sob carga.
     const senhaProvisoria = gerarSenhaProvisoria();
-    const senhaHash = await bcrypt.hash(senhaProvisoria, 10);
+    const senhaHash = await bcrypt.hash(senhaProvisoria, CUSTO_BCRYPT);
 
     const client = await comConexaoTenant(req.usuario.associacao_id);
     try {

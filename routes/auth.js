@@ -3,10 +3,13 @@ const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
-const pool = require('../db');
 const config = require('../config/env');
-const { autenticar, comConexaoTenant, comConexaoAuth } = require('../middleware/auth');
-const { senhaForte } = require('../utils/validacao');
+// `pool` não é mais importado aqui de propósito (SEC-016, 08/08/2026): toda
+// query que não pertence a tenant nenhum passa por `conexaoNeutra`, que
+// declara as três flags de sessão. Sem o import, não dá pra voltar a usar
+// `pool.query` direto sem perceber.
+const { autenticar, comConexaoTenant, comConexaoAuth, conexaoNeutra } = require('../middleware/auth');
+const { senhaForte, CUSTO_BCRYPT } = require('../utils/validacao');
 const { registrarEventoAuth } = require('../utils/authLog');
 const { registrarLogAuditoria } = require('../utils/auditoria');
 const { limiteLogin, limiteLoginPorConta, limiteRedefinicao } = require('../middleware/rateLimiter');
@@ -19,7 +22,7 @@ const JWT_SECRET = config.jwtSecret;
 // nesse caso e a resposta volta bem mais rápido -- essa diferença de tempo,
 // sozinha, já denuncia quais e-mails existem na plataforma. Calculado uma vez
 // na subida do processo; o valor em si nunca é usado pra autenticar nada.
-const HASH_INEXISTENTE = bcrypt.hashSync('usuario-inexistente-nunca-autentica', 10);
+const HASH_INEXISTENTE = bcrypt.hashSync('usuario-inexistente-nunca-autentica', CUSTO_BCRYPT);
 
 function assinarToken(usuario) {
     return jwt.sign(
@@ -76,8 +79,8 @@ router.post('/login', limiteLogin, limiteLoginPorConta, async (req, res) => {
             // de CPU do caminho normal (ver HASH_INEXISTENTE no topo) -- o
             // resultado é ignorado de propósito.
             await bcrypt.compare(senha, HASH_INEXISTENTE);
-            await registrarEventoAuth(pool, { emailTentado: email, evento: 'login_falha', req });
-            await registrarLogAuditoria(pool, {
+            await registrarEventoAuth(conexaoNeutra, { emailTentado: email, evento: 'login_falha', req });
+            await registrarLogAuditoria(conexaoNeutra, {
                 usuarioEmail: email, modulo: 'autenticacao', tipoAcao: 'login',
                 descricao: 'tentativa de login falhou para ' + email, req,
             });
@@ -86,14 +89,14 @@ router.post('/login', limiteLogin, limiteLoginPorConta, async (req, res) => {
 
         const senhaCorreta = await bcrypt.compare(senha, usuario.senha_hash);
         if (!senhaCorreta) {
-            await registrarEventoAuth(pool, {
+            await registrarEventoAuth(conexaoNeutra, {
                 usuarioId: usuario.id,
                 associacaoId: usuario.associacao_id,
                 emailTentado: email,
                 evento: 'login_falha',
                 req,
             });
-            await registrarLogAuditoria(pool, {
+            await registrarLogAuditoria(conexaoNeutra, {
                 associacaoId: usuario.associacao_id, usuarioId: usuario.id, usuarioNome: usuario.nome, usuarioEmail: email,
                 modulo: 'autenticacao', tipoAcao: 'login',
                 descricao: 'tentativa de login com senha incorreta para ' + usuario.nome, req,
@@ -109,14 +112,14 @@ router.post('/login', limiteLogin, limiteLoginPorConta, async (req, res) => {
         // Quem acertou a senha é o dono da conta e merece a mensagem útil;
         // quem não acertou recebe o mesmo 401 de sempre.
         if (!usuario.associacao_ativa) {
-            await registrarEventoAuth(pool, {
+            await registrarEventoAuth(conexaoNeutra, {
                 usuarioId: usuario.id,
                 associacaoId: usuario.associacao_id,
                 emailTentado: email,
                 evento: 'login_falha',
                 req,
             });
-            await registrarLogAuditoria(pool, {
+            await registrarLogAuditoria(conexaoNeutra, {
                 associacaoId: usuario.associacao_id, usuarioId: usuario.id, usuarioNome: usuario.nome, usuarioEmail: email,
                 modulo: 'autenticacao', tipoAcao: 'login',
                 descricao: usuario.nome + ' tentou logar com a associação bloqueada', req,
@@ -126,14 +129,14 @@ router.post('/login', limiteLogin, limiteLoginPorConta, async (req, res) => {
 
         const token = assinarToken(usuario);
 
-        await registrarEventoAuth(pool, {
+        await registrarEventoAuth(conexaoNeutra, {
             usuarioId: usuario.id,
             associacaoId: usuario.associacao_id,
             emailTentado: email,
             evento: 'login_sucesso',
             req,
         });
-        await registrarLogAuditoria(pool, {
+        await registrarLogAuditoria(conexaoNeutra, {
             associacaoId: usuario.associacao_id, usuarioId: usuario.id, usuarioNome: usuario.nome, usuarioEmail: email,
             modulo: 'autenticacao', tipoAcao: 'login',
             descricao: usuario.nome + ' realizou login', req,
@@ -208,7 +211,7 @@ router.post('/redefinir-senha', limiteRedefinicao, async (req, res) => {
     // Hasheado antes de pegar a conexão -- bcrypt não depende do token ser
     // válido; fazer isso antes evita segurar a conexão/transação durante os
     // ~50-100ms de CPU do hash (mesmo raciocínio de routes/associados.js).
-    const senhaHash = await bcrypt.hash(senha_nova, 10);
+    const senhaHash = await bcrypt.hash(senha_nova, CUSTO_BCRYPT);
 
     const client = await comConexaoAuth();
     try {
@@ -297,7 +300,7 @@ router.put('/senha', autenticar, async (req, res) => {
             return res.status(401).json({ erro: 'Senha atual incorreta' });
         }
 
-        const novoHash = await bcrypt.hash(senha_nova, 10);
+        const novoHash = await bcrypt.hash(senha_nova, CUSTO_BCRYPT);
 
         const clienteEscrita = await comConexaoTenant(req.usuario.associacao_id);
         try {
