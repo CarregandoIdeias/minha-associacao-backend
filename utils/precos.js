@@ -99,6 +99,26 @@ function alertaAssinatura(associacao, hoje) {
     return { tipo: 'assinatura', dias_restantes: diasRestantes, nivel: nivel };
 }
 
+// Tolerância antes de BLOQUEAR acesso por assinatura paga vencida
+// (auditoria de segurança Fase 3, 08/08/2026 -- SEC-015). Diferente de
+// statusAssinatura() acima, que já marca 'vencida' no dia 0 (usado só como
+// badge informativo no Dashboard/Super Admin) -- essa função é o cálculo
+// separado que decide bloqueio de acesso de verdade, com folga porque a
+// cobrança é manual (Pix + comprovante + aprovação do Super Admin), não
+// instantânea.
+const DIAS_TOLERANCIA_ASSINATURA_VENCIDA = 5;
+
+// Verdadeiro quando o acesso deve ser bloqueado por assinatura paga vencida
+// há mais de DIAS_TOLERANCIA_ASSINATURA_VENCIDA dias. Nunca bloqueia trial
+// (isso é bloquearTrialExpirado, outro middleware) nem plano pago sem
+// vencimento definido (associação legada/negociação manual).
+function assinaturaBloqueadaPorVencimento(plano, vencimentoAssinatura, hoje) {
+    if (plano === 'trial' || !vencimentoAssinatura) return false;
+    const limite = new Date(vencimentoAssinatura);
+    limite.setDate(limite.getDate() + DIAS_TOLERANCIA_ASSINATURA_VENCIDA);
+    return limite < (hoje || new Date());
+}
+
 // Próximo plano pago sugerido a partir do atual -- usado na sugestão
 // automática de upgrade (item 3, 30/07/2026). trial não entra aqui porque
 // não tem "próximo" único: ao esgotar o trial a associação escolhe
@@ -174,6 +194,7 @@ module.exports = {
     LIMITE_ASSOCIADOS_PLANO,
     NIVEL_PLANO,
     PROXIMO_PLANO,
+    DIAS_TOLERANCIA_ASSINATURA_VENCIDA,
     planoAtendeNivel,
     calcularValorMensalidade,
     statusAssinatura,
@@ -181,4 +202,5 @@ module.exports = {
     alertaLimiteAssociados,
     planosGerenciaveis,
     planoMinimoParaComportar,
+    assinaturaBloqueadaPorVencimento,
 };

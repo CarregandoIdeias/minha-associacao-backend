@@ -6,18 +6,27 @@
 // em vez de cross-tenant. Só admin/diretoria vêem (mesmo nível de acesso
 // de Usuários).
 const express = require('express');
-const { autenticar, bloquearSenhaProvisoria, bloquearTrialExpirado, exigirPlano, autorizar, comConexaoTenant } = require('../middleware/auth');
+const { autenticar, bloquearSenhaProvisoria, bloquearTrialExpirado, bloquearAssinaturaVencida, exigirPlano, autorizar, comConexaoTenant } = require('../middleware/auth');
 const { registrarLogAuditoria } = require('../utils/auditoria');
 const { gerarPdfLogs } = require('../utils/exportarLogs');
-const { inteiroPositivo } = require('../utils/validacao');
+const { inteiroPositivo, dataValida } = require('../utils/validacao');
 const { limiteExportacao } = require('../middleware/rateLimiter');
 
 const router = express.Router();
 router.use(autenticar);
 router.use(bloquearSenhaProvisoria);
 router.use(bloquearTrialExpirado);
+router.use(bloquearAssinaturaVencida);
 
 const LIMITE_EXPORTACAO = 5000;
+
+// Auditoria de segurança Fase 3, 08/08/2026 -- SEC-022: mesmo enum de
+// routes/superadmin.js (TIPOS_ACAO_AUDITORIA_VALIDOS), duplicado aqui por
+// serem módulos separados sem util compartilhado pra isso ainda.
+const TIPOS_ACAO_AUDITORIA_VALIDOS = [
+    'login', 'logout', 'criacao', 'edicao', 'exclusao',
+    'alteracao_senha', 'alteracao_permissoes', 'exportacao',
+];
 
 function construirFiltros(query, associacaoId) {
     const { usuario, modulo, tipo_acao, data_inicio, data_fim } = query;
@@ -33,14 +42,23 @@ function construirFiltros(query, associacaoId) {
         condicoes.push(`l.modulo = $${valores.length}`);
     }
     if (tipo_acao) {
+        if (!TIPOS_ACAO_AUDITORIA_VALIDOS.includes(tipo_acao)) {
+            return { erro: 'tipo_acao inválido' };
+        }
         valores.push(tipo_acao);
         condicoes.push(`l.tipo_acao = $${valores.length}::tipo_acao_auditoria`);
     }
     if (data_inicio) {
+        if (!dataValida(data_inicio)) {
+            return { erro: 'data_inicio inválida' };
+        }
         valores.push(data_inicio);
         condicoes.push(`l.criado_em >= $${valores.length}::date`);
     }
     if (data_fim) {
+        if (!dataValida(data_fim)) {
+            return { erro: 'data_fim inválida' };
+        }
         valores.push(data_fim);
         condicoes.push(`l.criado_em < $${valores.length}::date + interval '1 day'`);
     }
@@ -53,9 +71,12 @@ function construirFiltros(query, associacaoId) {
 // diferencial exclusivo desse plano na landing page).
 router.get('/', autorizar('admin', 'diretoria', 'financeiro', 'atendimento', 'operador', 'consulta'), exigirPlano('avancado'), async (req, res) => {
     const { pagina, por_pagina, ordenar } = req.query;
+    const { where, valores, erro } = construirFiltros(req.query, req.usuario.associacao_id);
+    if (erro) {
+        return res.status(400).json({ erro });
+    }
     const client = await comConexaoTenant(req.usuario.associacao_id);
     try {
-        const { where, valores } = construirFiltros(req.query, req.usuario.associacao_id);
         const direcao = ordenar === 'asc' ? 'ASC' : 'DESC';
         const limite = inteiroPositivo(por_pagina, 50, 200);
         const paginaAtual = Math.max(parseInt(pagina, 10) || 1, 1);
@@ -98,10 +119,13 @@ router.get('/exportar/:formato', autorizar('admin', 'diretoria', 'financeiro', '
     if (formato !== 'pdf') {
         return res.status(400).json({ erro: 'formato deve ser "pdf"' });
     }
+    const { where, valores, erro } = construirFiltros(req.query, req.usuario.associacao_id);
+    if (erro) {
+        return res.status(400).json({ erro });
+    }
 
     const client = await comConexaoTenant(req.usuario.associacao_id);
     try {
-        const { where, valores } = construirFiltros(req.query, req.usuario.associacao_id);
         const valoresLimitados = [...valores, LIMITE_EXPORTACAO];
         const resultado = await client.query(
             `SELECT l.criado_em, l.usuario_nome, l.usuario_email, l.super_admin_nome, l.super_admin_email,

@@ -2,7 +2,7 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
-const { autenticar, bloquearSenhaProvisoria, bloquearTrialExpirado, autorizar, comConexaoTenant } = require('../middleware/auth');
+const { autenticar, bloquearSenhaProvisoria, bloquearTrialExpirado, bloquearAssinaturaVencida, autorizar, comConexaoTenant } = require('../middleware/auth');
 const { emailValido, nomeValido, gerarSenhaProvisoria } = require('../utils/validacao');
 const { planoAtendeNivel } = require('../utils/precos');
 
@@ -25,6 +25,7 @@ router.param('id', paramUuid);
 router.use(autenticar);
 router.use(bloquearSenhaProvisoria);
 router.use(bloquearTrialExpirado);
+router.use(bloquearAssinaturaVencida);
 
 // GET /usuarios — lista os usuários da associação (só admin)
 router.get('/', autorizar('admin'), async (req, res) => {
@@ -296,6 +297,14 @@ router.patch('/:id/redefinir-senha', autorizar('admin'), async (req, res) => {
         if (resultado.rows.length === 0) {
             return res.status(404).json({ erro: 'Usuário não encontrado' });
         }
+        // Auditoria de segurança Fase 3, 08/08/2026 -- SEC-025: invalida
+        // qualquer link de redefinição pendente desse usuário -- a senha já
+        // mudou por este caminho, um link antigo (válido por 1h) não pode
+        // continuar valendo.
+        await client.query(
+            `UPDATE password_resets SET usado = true WHERE usuario_id = $1 AND usado = false`,
+            [id]
+        );
         await registrarLogAuditoria(client, {
             associacaoId: req.usuario.associacao_id, usuarioId: req.usuario.id, usuarioNome: req.usuario.nome, usuarioEmail: req.usuario.email,
             modulo: 'usuarios', tipoAcao: 'alteracao_senha',

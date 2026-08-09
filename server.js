@@ -64,6 +64,15 @@ app.get('/', (req, res) => {
     res.json({ status: 'ok', servico: 'plataforma-associacoes-api' });
 });
 
+// Rota inexistente -- auditoria de segurança Fase 3, 08/08/2026 (SEC-021).
+// Sem isso, o Express devolvia a página HTML padrão de 404, inconsistente
+// com o resto da API (que só fala JSON). Precisa vir depois de todas as
+// rotas montadas (senão intercepta tudo) e antes do error handler de 4
+// argumentos abaixo (esse é só para exceção, não para "rota não existe").
+app.use((req, res) => {
+    res.status(404).json({ erro: 'Rota não encontrada' });
+});
+
 // Rede de segurança: no Express 4, uma exceção lançada dentro de um handler
 // async NÃO vira resposta de erro -- vira rejeição não tratada, e a requisição
 // fica pendurada até o navegador desistir (sintoma: "o sistema trava/está

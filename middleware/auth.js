@@ -2,7 +2,7 @@
 const jwt = require('jsonwebtoken');
 const pool = require('../db');
 const config = require('../config/env');
-const { planoAtendeNivel } = require('../utils/precos');
+const { planoAtendeNivel, assinaturaBloqueadaPorVencimento } = require('../utils/precos');
 
 const JWT_SECRET = config.jwtSecret;
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -69,7 +69,7 @@ async function autenticar(req, res, next) {
             const resultado = await client.query(
                 `SELECT u.ativo, u.papel, u.nome, u.associacao_id, u.senha_alterada_em,
                         u.sessoes_invalidas_antes_de,
-                        a.ativo AS associacao_ativa, a.plano, a.trial_expira_em
+                        a.ativo AS associacao_ativa, a.plano, a.trial_expira_em, a.vencimento_assinatura
                  FROM usuarios u
                  JOIN associacoes a ON a.id = u.associacao_id
                  WHERE u.id = $1`,
@@ -119,6 +119,7 @@ async function autenticar(req, res, next) {
                 nome: usuario.nome,
                 plano: usuario.plano,
                 trial_expira_em: usuario.trial_expira_em,
+                vencimento_assinatura: usuario.vencimento_assinatura,
             };
             return next();
         } catch (err) {
@@ -156,6 +157,23 @@ function bloquearTrialExpirado(req, res, next) {
         return res.status(403).json({
             erro: 'Seu período de avaliação terminou. Contrate um plano para continuar usando a plataforma.',
             codigo: 'TRIAL_EXPIRADO',
+        });
+    }
+    next();
+}
+
+// Bloqueia rotas normais quando uma assinatura PAGA está vencida há mais de
+// DIAS_TOLERANCIA_ASSINATURA_VENCIDA dias (auditoria de segurança Fase 3,
+// 08/08/2026 -- SEC-015). Antes disso, uma associação em plano pago com a
+// assinatura vencida continuava com acesso integral -- só o trial vencido
+// bloqueava de fato. Mesmo raciocínio de bloquearTrialExpirado (mantém
+// dados, só nega acesso); não usar em routes/plano.js, que precisa
+// continuar funcionando pra associação regularizar e sair do bloqueio.
+function bloquearAssinaturaVencida(req, res, next) {
+    if (req.usuario && assinaturaBloqueadaPorVencimento(req.usuario.plano, req.usuario.vencimento_assinatura)) {
+        return res.status(403).json({
+            erro: 'Sua assinatura está vencida. Regularize o pagamento para continuar usando a plataforma.',
+            codigo: 'ASSINATURA_VENCIDA',
         });
     }
     next();
@@ -376,6 +394,7 @@ module.exports = {
     autenticar,
     bloquearSenhaProvisoria,
     bloquearTrialExpirado,
+    bloquearAssinaturaVencida,
     exigirPlano,
     autorizar,
     comConexaoTenant,

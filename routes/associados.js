@@ -2,8 +2,8 @@
 // CRUD completo já usando o isolamento por tenant (RLS).
 const express = require('express');
 const bcrypt = require('bcryptjs');
-const { autenticar, bloquearSenhaProvisoria, bloquearTrialExpirado, autorizar, comConexaoTenant } = require('../middleware/auth');
-const { cpfValido, emailValido, gerarSenhaProvisoria, textoLivreValido, inteiroPositivo } = require('../utils/validacao');
+const { autenticar, bloquearSenhaProvisoria, bloquearTrialExpirado, bloquearAssinaturaVencida, autorizar, comConexaoTenant } = require('../middleware/auth');
+const { cpfValido, emailValido, gerarSenhaProvisoria, textoLivreValido, inteiroPositivo, nomeValido } = require('../utils/validacao');
 const { registrarEventoAuth } = require('../utils/authLog');
 const { registrarAtividade } = require('../utils/atividadeLog');
 const { registrarLogAuditoria } = require('../utils/auditoria');
@@ -18,6 +18,7 @@ router.param('id', paramUuid);
 router.use(autenticar);
 router.use(bloquearSenhaProvisoria);
 router.use(bloquearTrialExpirado);
+router.use(bloquearAssinaturaVencida);
 
 // GET /associados — lista os associados da associação do usuário logado (só admin/diretoria)
 //
@@ -82,6 +83,13 @@ router.post('/', autorizar('admin', 'diretoria', 'atendimento', 'operador'), asy
 
     if (!nome_completo || !nome_completo.trim()) {
         return res.status(400).json({ erro: 'nome_completo é obrigatório' });
+    }
+    // Auditoria de segurança Fase 3, 08/08/2026 -- SEC-023: nome_completo só
+    // checava "não vazio". Fecha o mesmo vetor já corrigido em
+    // routes/usuarios.js (29/07/2026) -- esse valor vira usuarios.nome, que
+    // vira req.usuario.nome nas descrições de logs_auditoria.
+    if (!nomeValido(nome_completo)) {
+        return res.status(400).json({ erro: 'nome_completo inválido (máximo 120 caracteres, sem caracteres de controle)' });
     }
     if (cpf && !cpfValido(cpf)) {
         return res.status(400).json({ erro: 'CPF inválido' });
@@ -204,6 +212,9 @@ router.put('/:id', autorizar('admin', 'diretoria', 'atendimento', 'operador'), a
 
     if (!nome_completo || !nome_completo.trim()) {
         return res.status(400).json({ erro: 'nome_completo é obrigatório' });
+    }
+    if (!nomeValido(nome_completo)) {
+        return res.status(400).json({ erro: 'nome_completo inválido (máximo 120 caracteres, sem caracteres de controle)' });
     }
     if (cpf && !cpfValido(cpf)) {
         return res.status(400).json({ erro: 'CPF inválido' });

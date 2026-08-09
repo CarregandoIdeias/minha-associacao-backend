@@ -305,6 +305,14 @@ router.put('/senha', autenticar, async (req, res) => {
                 `UPDATE usuarios SET senha_hash = $1, deve_trocar_senha = false, senha_alterada_em = now() WHERE id = $2`,
                 [novoHash, req.usuario.id]
             );
+            // Auditoria de segurança Fase 3, 08/08/2026 -- SEC-025: um link
+            // de redefinição pendente (válido por 1h, uso único) continuava
+            // "vivo" mesmo depois da senha já ter sido trocada por este
+            // caminho -- invalida qualquer um que ainda não tenha sido usado.
+            await clienteEscrita.query(
+                `UPDATE password_resets SET usado = true WHERE usuario_id = $1 AND usado = false`,
+                [req.usuario.id]
+            );
 
             await registrarEventoAuth(clienteEscrita, {
                 usuarioId: req.usuario.id,

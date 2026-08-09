@@ -1,6 +1,6 @@
 // routes/configuracoes.js
 const express = require('express');
-const { autenticar, bloquearSenhaProvisoria, bloquearTrialExpirado, exigirPlano, autorizar, comConexaoTenant } = require('../middleware/auth');
+const { autenticar, bloquearSenhaProvisoria, bloquearTrialExpirado, bloquearAssinaturaVencida, exigirPlano, autorizar, comConexaoTenant } = require('../middleware/auth');
 const { registrarLogAuditoria } = require('../utils/auditoria');
 const { imagemBase64Valida } = require('../utils/validacao');
 const { limiteUpload } = require('../middleware/rateLimiter');
@@ -9,6 +9,7 @@ const router = express.Router();
 router.use(autenticar);
 router.use(bloquearSenhaProvisoria);
 router.use(bloquearTrialExpirado);
+router.use(bloquearAssinaturaVencida);
 
 // GET /configuracoes/pix — qualquer usuário autenticado pode ler (precisa para montar o QR code)
 router.get('/pix', async (req, res) => {

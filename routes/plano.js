@@ -13,6 +13,7 @@ const { limiteUpload } = require('../middleware/rateLimiter');
 const {
     calcularValorMensalidade, statusAssinatura, alertaAssinatura, LIMITE_ASSOCIADOS_PLANO,
     PROXIMO_PLANO, alertaLimiteAssociados, planosGerenciaveis, planoMinimoParaComportar,
+    assinaturaBloqueadaPorVencimento,
 } = require('../utils/precos');
 
 const router = express.Router();
@@ -106,6 +107,13 @@ router.get('/', autorizar('admin', 'diretoria'), async (req, res) => {
             plano_renovacao_sugerido: planoRenovacaoSugerido,
             status: statusAssinatura(a),
             alerta: alertaAssinatura(a),
+            // Fonte única de verdade pro front decidir quando mostrar a tela
+            // de bloqueio por assinatura vencida (SEC-015, 08/08/2026) --
+            // mesma função usada por bloquearAssinaturaVencida
+            // (middleware/auth.js), sem duplicar o cálculo de data no
+            // cliente. Diferente de status === 'vencida' (que já é true no
+            // dia 0, só informativo).
+            bloqueio_assinatura_vencida: assinaturaBloqueadaPorVencimento(a.plano, a.vencimento_assinatura),
             pix_plataforma: pixPlataforma.rows[0] || { chave_pix: null, nome_recebedor_pix: null, cidade_pix: null },
             solicitacao_pendente: solicitacaoPendente.rows[0] || null,
         });
