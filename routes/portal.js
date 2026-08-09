@@ -1,7 +1,7 @@
 // routes/portal.js
 // Rotas exclusivas para o papel "associado" — cada um só vê os próprios dados.
 const express = require('express');
-const { autenticar, bloquearSenhaProvisoria, bloquearTrialExpirado, autorizar, comConexaoTenant } = require('../middleware/auth');
+const { autenticar, bloquearSenhaProvisoria, bloquearTrialExpirado, bloquearAssinaturaVencida, autorizar, comConexaoTenant } = require('../middleware/auth');
 const { imagemBase64Valida, comprovanteBase64Valido } = require('../utils/validacao');
 const { limiteUpload } = require('../middleware/rateLimiter');
 
@@ -12,6 +12,7 @@ router.param('id', paramUuid);
 router.use(autenticar);
 router.use(bloquearSenhaProvisoria);
 router.use(bloquearTrialExpirado);
+router.use(bloquearAssinaturaVencida);
 router.use(autorizar('associado'));
 
 // GET /portal/meus-dados — dados do associado vinculado ao usuário logado

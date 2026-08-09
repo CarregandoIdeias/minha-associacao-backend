@@ -7,7 +7,7 @@ const pool = require('../db');
 const config = require('../config/env');
 const { autenticarSuperAdmin, autorizarSuperAdmin, comConexaoSuperAdmin } = require('../middleware/auth');
 const { limiteLogin, limiteLoginPorConta, limiteExportacao, limiteUpload, limiteBootstrap } = require('../middleware/rateLimiter');
-const { emailValido, gerarSenhaProvisoria, cpfValido, senhaForte, imagemBase64Valida, inteiroPositivo } = require('../utils/validacao');
+const { emailValido, gerarSenhaProvisoria, cpfValido, senhaForte, imagemBase64Valida, inteiroPositivo, textoLivreValido, dataValida } = require('../utils/validacao');
 const { registrarEventoAuth } = require('../utils/authLog');
 const { registrarLogAuditoria } = require('../utils/auditoria');
 const { calcularValorMensalidade, statusAssinatura } = require('../utils/precos');
@@ -18,6 +18,16 @@ const FORMAS_COBRANCA_VALIDAS = ['pix', 'boleto', 'cartao', 'dinheiro', 'outro']
 // sprint 1.4, pra manter o dropdown do formulário previsível.
 const DIAS_ALERTA_ASSINATURA_VALIDOS = [30, 20, 15, 10, 7, 3];
 const PAPEIS_SUPERADMIN_VALIDOS = ['super_admin', 'administrador', 'suporte'];
+// Auditoria de segurança Fase 3, 08/08/2026 -- SEC-022: ?plano= em
+// GET /associacoes não era validado contra o enum plano_assinatura antes
+// de entrar na query -- um valor fora da lista virava 500 do Postgres.
+const PLANOS_VALIDOS = ['trial', 'basico', 'intermediario', 'avancado'];
+// Mesmo raciocínio pra ?tipo_acao= nos filtros de log (GET /logs e
+// GET /auditoria) -- enum tipo_acao_auditoria.
+const TIPOS_ACAO_AUDITORIA_VALIDOS = [
+    'login', 'logout', 'criacao', 'edicao', 'exclusao',
+    'alteracao_senha', 'alteracao_permissoes', 'exportacao',
+];
 
 // Modelo de permissão dos níveis da plataforma (menor privilégio):
 //
@@ -454,6 +464,9 @@ router.put('/perfil/senha', async (req, res) => {
 // Toca associados/cobrancas (têm RLS) -> usa conexão de bypass do super-admin
 router.get('/associacoes', async (req, res) => {
     const { busca, cidade, estado, plano, status, limite } = req.query;
+    if (plano && !PLANOS_VALIDOS.includes(plano)) {
+        return res.status(400).json({ erro: 'plano inválido' });
+    }
     const client = await comConexaoSuperAdmin();
     try {
         const condicoes = [];
@@ -517,7 +530,20 @@ router.get('/associacoes/:id', async (req, res) => {
     const { id } = req.params;
     const client = await comConexaoSuperAdmin();
     try {
-        const associacao = await client.query(`SELECT * FROM associacoes WHERE id = $1`, [id]);
+        // SELECT explícito, sem logo_url (auditoria de segurança Fase 3,
+        // 08/08/2026 -- SEC-018): era `SELECT *`, devolvendo a logo inteira
+        // em base64 (até ~2,8MB) numa tela que não usa isso pra nada -- a
+        // logo já tem rota própria. Demais colunas mantidas (ex. chave_pix),
+        // já usadas nesta ficha de detalhe pra suporte.
+        const associacao = await client.query(
+            `SELECT id, nome, cnpj, tipo, plano, cor_primaria, ativo, criado_em, atualizado_em,
+                    chave_pix, nome_recebedor_pix, cidade_pix, dias_alerta_vencimento,
+                    email, telefone, endereco, cidade, estado, cep, site,
+                    valor_mensalidade_manual, vencimento_assinatura, forma_cobranca,
+                    trial_dias, trial_expira_em, dias_alerta_assinatura
+             FROM associacoes WHERE id = $1`,
+            [id]
+        );
         if (associacao.rows.length === 0) {
             return res.status(404).json({ erro: 'Associação não encontrada' });
         }
@@ -555,13 +581,46 @@ router.get('/associacoes/:id', async (req, res) => {
     }
 });
 
+// GET /superadmin/associacoes/:id/logo — logo em base64, separada do
+// GET /associacoes/:id principal (auditoria de segurança Fase 3,
+// 08/08/2026 -- SEC-018). Mesmo padrão já usado pra comprovantes
+// (GET /cobrancas/:id/comprovante, GET /solicitacoes-plano/:id/comprovante)
+// -- blob pesado só é buscado sob demanda, aqui pela tela de edição de
+// associação (abrirEdicaoAssociacao, painel/superadmin.html), que precisa
+// mostrar a logo atual antes de trocar.
+router.get('/associacoes/:id/logo', async (req, res) => {
+    const { id } = req.params;
+    res.set('Cache-Control', 'no-store');
+    const client = await comConexaoSuperAdmin();
+    try {
+        const resultado = await client.query(`SELECT logo_url FROM associacoes WHERE id = $1`, [id]);
+        if (resultado.rows.length === 0) {
+            return res.status(404).json({ erro: 'Associação não encontrada' });
+        }
+        res.json(resultado.rows[0]);
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ erro: 'Erro ao buscar logo' });
+    } finally {
+        client.release();
+    }
+});
+
 // GET /superadmin/associacoes/:id/associados — lista só-leitura dos associados dessa associação
+//
+// Sem cpf de propósito (auditoria de segurança Fase 3, 08/08/2026 --
+// SEC-017): o Super Admin não precisa do documento completo de cada
+// associado de cada tenant pra suporte/cobrança da plataforma -- nome,
+// telefone, categoria, status e data de ingresso já bastam. Diferente do
+// lado do tenant (routes/associados.js), que mantém CPF/RG completos --
+// lá a equipe da própria associação usa isso pra confirmar identidade/bater
+// com comprovante, uso legítimo que mascarar quebraria.
 router.get('/associacoes/:id/associados', async (req, res) => {
     const { id } = req.params;
     const client = await comConexaoSuperAdmin();
     try {
         const resultado = await client.query(
-            `SELECT id, nome_completo, cpf, telefone, categoria, status, data_ingresso
+            `SELECT id, nome_completo, telefone, categoria, status, data_ingresso
              FROM associados WHERE associacao_id = $1 ORDER BY nome_completo`,
             [id]
         );
@@ -614,6 +673,13 @@ router.patch('/associacoes/:id/resetar-senha-admin', autorizarSuperAdmin(...GEST
         if (resultado.rows.length === 0) {
             return res.status(404).json({ erro: 'Admin dessa associação não encontrado' });
         }
+        // Auditoria de segurança Fase 3, 08/08/2026 -- SEC-025: invalida
+        // qualquer link de redefinição pendente desse admin -- a senha já
+        // mudou por este caminho.
+        await client.query(
+            `UPDATE password_resets SET usado = true WHERE usuario_id = $1 AND usado = false`,
+            [resultado.rows[0].id]
+        );
 
         await registrarEventoAuth(client, {
             usuarioId: resultado.rows[0].id,
@@ -1025,15 +1091,29 @@ function construirFiltrosLogs(query) {
         valores.push(modulo);
         condicoes.push(`l.modulo = $${valores.length}`);
     }
+    // Auditoria de segurança Fase 3, 08/08/2026 -- SEC-022: tipo_acao/
+    // data_inicio/data_fim não eram validados antes de entrar na query --
+    // valor fora do enum ou data inválida virava 500 do Postgres/JS em vez
+    // de 400. `erro` no retorno sinaliza pro chamador devolver 400 antes de
+    // rodar qualquer query.
     if (tipo_acao) {
+        if (!TIPOS_ACAO_AUDITORIA_VALIDOS.includes(tipo_acao)) {
+            return { erro: 'tipo_acao inválido' };
+        }
         valores.push(tipo_acao);
         condicoes.push(`l.tipo_acao = $${valores.length}::tipo_acao_auditoria`);
     }
     if (data_inicio) {
+        if (!dataValida(data_inicio)) {
+            return { erro: 'data_inicio inválida' };
+        }
         valores.push(data_inicio);
         condicoes.push(`l.criado_em >= $${valores.length}::date`);
     }
     if (data_fim) {
+        if (!dataValida(data_fim)) {
+            return { erro: 'data_fim inválida' };
+        }
         valores.push(data_fim);
         condicoes.push(`l.criado_em < $${valores.length}::date + interval '1 day'`);
     }
@@ -1049,9 +1129,12 @@ const LIMITE_EXPORTACAO = 5000;
 // permissão pode consultar; é só leitura)
 router.get('/logs', async (req, res) => {
     const { pagina, por_pagina, ordenar, limite: limiteQuery } = req.query;
+    const { where, valores, erro } = construirFiltrosLogs(req.query);
+    if (erro) {
+        return res.status(400).json({ erro });
+    }
     const client = await comConexaoSuperAdmin();
     try {
-        const { where, valores } = construirFiltrosLogs(req.query);
         const direcao = ordenar === 'asc' ? 'ASC' : 'DESC';
         // Se passou 'limite', usa como atalho pra simples listagem sem paginação;
         // senão, usa paginação normal com por_pagina/pagina.
@@ -1102,10 +1185,13 @@ router.get('/logs/exportar/:formato', autorizarSuperAdmin(...GESTAO), limiteExpo
     if (formato !== 'pdf') {
         return res.status(400).json({ erro: 'formato deve ser "pdf"' });
     }
+    const { where, valores, erro } = construirFiltrosLogs(req.query);
+    if (erro) {
+        return res.status(400).json({ erro });
+    }
 
     const client = await comConexaoSuperAdmin();
     try {
-        const { where, valores } = construirFiltrosLogs(req.query);
         const valoresLimitados = [...valores, LIMITE_EXPORTACAO];
         const resultado = await client.query(
             `SELECT l.criado_em, l.usuario_nome, l.usuario_email, l.super_admin_nome, l.super_admin_email,
@@ -1357,6 +1443,16 @@ router.post('/comunicados-plataforma', autorizarSuperAdmin(...GESTAO), async (re
     const { titulo, conteudo } = req.body;
     if (!titulo || !conteudo) {
         return res.status(400).json({ erro: 'titulo e conteudo são obrigatórios' });
+    }
+    // Auditoria de segurança Fase 3, 08/08/2026 -- SEC-014: mais sensível
+    // ainda que o comunicado normal (routes/comunicados.js), porque grava
+    // uma linha por associação ativa num loop só -- um titulo/conteudo
+    // gigante multiplica pelo número de tenants.
+    if (!textoLivreValido(titulo, 200)) {
+        return res.status(400).json({ erro: 'titulo inválido (máx. 200 caracteres, sem caracteres de controle)' });
+    }
+    if (!textoLivreValido(conteudo, 5000)) {
+        return res.status(400).json({ erro: 'conteudo inválido (máx. 5000 caracteres, sem caracteres de controle)' });
     }
 
     const client = await comConexaoSuperAdmin();

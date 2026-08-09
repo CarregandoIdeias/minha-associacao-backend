@@ -1,10 +1,11 @@
 // routes/comunicados.js
 const express = require('express');
-const { autenticar, bloquearSenhaProvisoria, bloquearTrialExpirado, exigirPlano, autorizar, comConexaoTenant } = require('../middleware/auth');
+const { autenticar, bloquearSenhaProvisoria, bloquearTrialExpirado, bloquearAssinaturaVencida, exigirPlano, autorizar, comConexaoTenant } = require('../middleware/auth');
 const { registrarAtividade } = require('../utils/atividadeLog');
 const { registrarLogAuditoria } = require('../utils/auditoria');
 const { gerarPdfLeituras } = require('../utils/exportarLeiturasComunicado');
 const { limiteExportacao } = require('../middleware/rateLimiter');
+const { textoLivreValido } = require('../utils/validacao');
 
 const paramUuid = require('../middleware/paramUuid');
 const router = express.Router();
@@ -13,6 +14,7 @@ router.param('id', paramUuid);
 router.use(autenticar);
 router.use(bloquearSenhaProvisoria);
 router.use(bloquearTrialExpirado);
+router.use(bloquearAssinaturaVencida);
 
 // GET /comunicados — lista comunicados (comportamento varia por papel)
 // Admin/diretoria: veem tudo (inclusive inativos/agendados), com busca e filtro de status,
@@ -81,6 +83,15 @@ router.post('/', autorizar('admin', 'diretoria', 'atendimento', 'operador'), asy
     if (!titulo || !conteudo) {
         return res.status(400).json({ erro: 'titulo e conteudo são obrigatórios' });
     }
+    // Auditoria de segurança Fase 3, 08/08/2026 -- SEC-014: titulo/conteudo
+    // não tinham validação nenhuma além de "não vazio", coluna text sem
+    // teto -- dava pra gravar megabytes por comunicado.
+    if (!textoLivreValido(titulo, 200)) {
+        return res.status(400).json({ erro: 'titulo inválido (máx. 200 caracteres, sem caracteres de controle)' });
+    }
+    if (!textoLivreValido(conteudo, 5000)) {
+        return res.status(400).json({ erro: 'conteudo inválido (máx. 5000 caracteres, sem caracteres de controle)' });
+    }
 
     const client = await comConexaoTenant(req.usuario.associacao_id);
     try {
@@ -121,6 +132,12 @@ router.put('/:id', autorizar('admin', 'diretoria', 'atendimento', 'operador'), a
 
     if (!titulo || !conteudo) {
         return res.status(400).json({ erro: 'titulo e conteudo são obrigatórios' });
+    }
+    if (!textoLivreValido(titulo, 200)) {
+        return res.status(400).json({ erro: 'titulo inválido (máx. 200 caracteres, sem caracteres de controle)' });
+    }
+    if (!textoLivreValido(conteudo, 5000)) {
+        return res.status(400).json({ erro: 'conteudo inválido (máx. 5000 caracteres, sem caracteres de controle)' });
     }
 
     const client = await comConexaoTenant(req.usuario.associacao_id);

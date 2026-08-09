@@ -1,6 +1,6 @@
 // routes/cobrancas.js
 const express = require('express');
-const { autenticar, bloquearSenhaProvisoria, bloquearTrialExpirado, autorizar, comConexaoTenant } = require('../middleware/auth');
+const { autenticar, bloquearSenhaProvisoria, bloquearTrialExpirado, bloquearAssinaturaVencida, autorizar, comConexaoTenant } = require('../middleware/auth');
 const { registrarAtividade } = require('../utils/atividadeLog');
 const { registrarLogAuditoria } = require('../utils/auditoria');
 const { inteiroPositivo, uuidValido, dataValida, valorMonetarioValido } = require('../utils/validacao');
@@ -9,9 +9,16 @@ const paramUuid = require('../middleware/paramUuid');
 const router = express.Router();
 // Rejeita :id que nao seja uuid com 400, em vez de deixar virar 500 no Postgres
 router.param('id', paramUuid);
+
+// Auditoria de segurança Fase 3, 08/08/2026 -- SEC-022: ?status= não era
+// validado contra o enum status_cobranca antes de entrar na query -- um
+// valor fora da lista virava 500 do Postgres em vez de 400.
+const STATUS_COBRANCA_VALIDOS = ['pendente', 'pago', 'atrasado', 'cancelado', 'aguardando_confirmacao'];
+
 router.use(autenticar);
 router.use(bloquearSenhaProvisoria);
 router.use(bloquearTrialExpirado);
+router.use(bloquearAssinaturaVencida);
 
 // GET /cobrancas — lista cobranças da associação, com filtro opcional por status ou associado (só admin/diretoria)
 //
@@ -20,6 +27,9 @@ router.use(bloquearTrialExpirado);
 // receita mensal dependem do array completo em cobrancasCache.
 router.get('/', autorizar('admin', 'diretoria', 'financeiro', 'atendimento', 'operador', 'consulta'), async (req, res) => {
     const { status, associado_id, pagina, por_pagina } = req.query;
+    if (status && !STATUS_COBRANCA_VALIDOS.includes(status)) {
+        return res.status(400).json({ erro: 'status inválido' });
+    }
     const client = await comConexaoTenant(req.usuario.associacao_id);
     try {
         const condicoes = [];
