@@ -15,6 +15,20 @@ function aguardar(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// Compara o iat do token (segundos, padrão do JWT) com um timestamp de
+// "invalidação" vindo do banco (milissegundos) -- usado tanto por
+// senha_alterada_em quanto por sessoes_invalidas_antes_de (logout real,
+// auditoria de segurança Fase 2, 08/08/2026). Arredondar os dois pro
+// mesmo segundo (Math.floor do lado do timestamp) evita rejeitar um token
+// novo emitido no mesmo segundo em que a invalidação aconteceu -- bug real
+// já encontrado e corrigido nesse ponto (ver PUT /auth/senha/PUT
+// /superadmin/perfil/senha, que reemitem token). Extraído aqui pra não
+// repetir essa conta 4 vezes (2 timestamps x 2 funções de autenticação) e
+// arriscar reintroduzir o mesmo bug numa cópia.
+function tokenInvalidadoPor(payload, timestampInvalidacao) {
+    return !!timestampInvalidacao && payload.iat < Math.floor(new Date(timestampInvalidacao).getTime() / 1000);
+}
+
 // Verifica o token e disponibiliza os dados do usuário em req.usuario.
 // Também revalida contra o banco a cada requisição (usuário/associação
 // ainda ativos, papel em dia) — sem isso, desativar alguém ou bloquear a
@@ -54,6 +68,7 @@ async function autenticar(req, res, next) {
         try {
             const resultado = await client.query(
                 `SELECT u.ativo, u.papel, u.nome, u.associacao_id, u.senha_alterada_em,
+                        u.sessoes_invalidas_antes_de,
                         a.ativo AS associacao_ativa, a.plano, a.trial_expira_em
                  FROM usuarios u
                  JOIN associacoes a ON a.id = u.associacao_id
@@ -75,7 +90,10 @@ async function autenticar(req, res, next) {
             // mesmo request que troca a senha, quando os dois caem no mesmo
             // segundo (bug real encontrado testando: o token reemitido por
             // PUT /auth/senha/PUT /superadmin/perfil/senha vinha inválido).
-            if (usuario.senha_alterada_em && payload.iat < Math.floor(new Date(usuario.senha_alterada_em).getTime() / 1000)) {
+            // Cobre os dois motivos de invalidação -- troca de senha e logout
+            // real (sessoes_invalidas_antes_de, Fase 2 da auditoria de
+            // segurança, 08/08/2026). Ver tokenInvalidadoPor() acima.
+            if (tokenInvalidadoPor(payload, usuario.senha_alterada_em) || tokenInvalidadoPor(payload, usuario.sessoes_invalidas_antes_de)) {
                 return res.status(401).json({ erro: 'Token inválido ou expirado' });
             }
 
@@ -279,7 +297,8 @@ async function autenticarSuperAdmin(req, res, next) {
     for (let tentativa = 1; tentativa <= MAX_TENTATIVAS; tentativa++) {
         try {
             const resultado = await pool.query(
-                `SELECT nome, papel, ativo, deve_trocar_senha, senha_alterada_em FROM super_admins WHERE id = $1`,
+                `SELECT nome, papel, ativo, deve_trocar_senha, senha_alterada_em, sessoes_invalidas_antes_de
+                 FROM super_admins WHERE id = $1`,
                 [payload.id]
             );
             const admin = resultado.rows[0];
@@ -290,7 +309,7 @@ async function autenticarSuperAdmin(req, res, next) {
             // Mesmo raciocínio (e mesmo cuidado de arredondamento) de
             // autenticar() acima: token emitido antes da última troca de
             // senha não vale mais.
-            if (admin.senha_alterada_em && payload.iat < Math.floor(new Date(admin.senha_alterada_em).getTime() / 1000)) {
+            if (tokenInvalidadoPor(payload, admin.senha_alterada_em) || tokenInvalidadoPor(payload, admin.sessoes_invalidas_antes_de)) {
                 return res.status(401).json({ erro: 'Token inválido ou expirado' });
             }
 

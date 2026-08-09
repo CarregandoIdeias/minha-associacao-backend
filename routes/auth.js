@@ -9,7 +9,7 @@ const { autenticar, comConexaoTenant, comConexaoAuth } = require('../middleware/
 const { senhaForte } = require('../utils/validacao');
 const { registrarEventoAuth } = require('../utils/authLog');
 const { registrarLogAuditoria } = require('../utils/auditoria');
-const { limiteLogin, limiteRedefinicao } = require('../middleware/rateLimiter');
+const { limiteLogin, limiteLoginPorConta, limiteRedefinicao } = require('../middleware/rateLimiter');
 
 const router = express.Router();
 const JWT_SECRET = config.jwtSecret;
@@ -50,7 +50,12 @@ function assinarToken(usuario) {
 // Login por e-mail + senha, sem precisar informar qual associação (o e-mail
 // já é único em toda a plataforma). Usa comConexaoAuth() porque ainda não
 // sabemos a qual tenant a requisição pertence — é isso que a query descobre.
-router.post('/login', limiteLogin, async (req, res) => {
+//
+// limiteLoginPorConta (auditoria de segurança Fase 2, 08/08/2026 --
+// SEC-013): limiteLogin sozinho é só por IP -- um atacante com muitos IPs
+// faz tentativas ilimitadas contra a mesma conta. Roda junto, não no
+// lugar: duas defesas independentes.
+router.post('/login', limiteLogin, limiteLoginPorConta, async (req, res) => {
     const { email, senha } = req.body;
 
     if (!email || !senha) {
@@ -346,23 +351,44 @@ router.patch('/boas-vindas-visto', autenticar, async (req, res) => {
 });
 
 // POST /auth/logout
-// JWT é stateless (não há revogação server-side ainda) — esse endpoint só
-// registra o evento para auditoria; quem efetivamente encerra a sessão é o
-// front-end, descartando o token guardado localmente.
+// Revoga de verdade (Fase 2 da auditoria de segurança, 08/08/2026 --
+// SEC-004): grava sessoes_invalidas_antes_de = now(), que autenticar()
+// (middleware/auth.js) compara com o iat de qualquer token desse usuário a
+// cada requisição. Antes disso o endpoint só registrava o evento -- um
+// token roubado continuava válido até expirar (até 8h) mesmo depois do
+// dono clicar em "Sair".
+//
+// Efeito colateral intencional: invalida TODAS as sessões abertas desse
+// usuário (todos os dispositivos), não só a que chamou este endpoint --
+// mesmo comportamento de "sair de todos os lugares" já usado por
+// plataformas grandes, e mais simples/seguro que um esquema por-token.
 router.post('/logout', autenticar, async (req, res) => {
-    await registrarEventoAuth(pool, {
-        usuarioId: req.usuario.id,
-        associacaoId: req.usuario.associacao_id,
-        emailTentado: req.usuario.email,
-        evento: 'logout',
-        req,
-    });
-    await registrarLogAuditoria(pool, {
-        associacaoId: req.usuario.associacao_id, usuarioId: req.usuario.id, usuarioNome: req.usuario.nome, usuarioEmail: req.usuario.email,
-        modulo: 'autenticacao', tipoAcao: 'logout',
-        descricao: req.usuario.nome + ' realizou logout', req,
-    });
-    res.json({ ok: true });
+    const client = await comConexaoTenant(req.usuario.associacao_id);
+    try {
+        await client.query(
+            `UPDATE usuarios SET sessoes_invalidas_antes_de = now() WHERE id = $1`,
+            [req.usuario.id]
+        );
+
+        await registrarEventoAuth(client, {
+            usuarioId: req.usuario.id,
+            associacaoId: req.usuario.associacao_id,
+            emailTentado: req.usuario.email,
+            evento: 'logout',
+            req,
+        });
+        await registrarLogAuditoria(client, {
+            associacaoId: req.usuario.associacao_id, usuarioId: req.usuario.id, usuarioNome: req.usuario.nome, usuarioEmail: req.usuario.email,
+            modulo: 'autenticacao', tipoAcao: 'logout',
+            descricao: req.usuario.nome + ' realizou logout', req,
+        });
+        res.json({ ok: true });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ erro: 'Erro ao encerrar sessão' });
+    } finally {
+        client.release();
+    }
 });
 
 module.exports = router;

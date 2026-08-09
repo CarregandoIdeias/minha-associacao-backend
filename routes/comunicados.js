@@ -4,6 +4,7 @@ const { autenticar, bloquearSenhaProvisoria, bloquearTrialExpirado, exigirPlano,
 const { registrarAtividade } = require('../utils/atividadeLog');
 const { registrarLogAuditoria } = require('../utils/auditoria');
 const { gerarPdfLeituras } = require('../utils/exportarLeiturasComunicado');
+const { limiteExportacao } = require('../middleware/rateLimiter');
 
 const paramUuid = require('../middleware/paramUuid');
 const router = express.Router();
@@ -237,7 +238,7 @@ router.get('/:id/leituras', autorizar('admin', 'diretoria', 'financeiro', 'atend
 // PDF; registra a exportação como linha de auditoria (mesmo padrão de
 // GET /superadmin/logs/exportar/:formato). Exigido plano Intermediário+
 // (gating por plano, 29/07/2026 — "Relatórios exportáveis" na landing).
-router.get('/:id/leituras/exportar/:formato', autorizar('admin', 'diretoria', 'financeiro', 'atendimento', 'operador', 'consulta'), exigirPlano('intermediario'), async (req, res) => {
+router.get('/:id/leituras/exportar/:formato', autorizar('admin', 'diretoria', 'financeiro', 'atendimento', 'operador', 'consulta'), exigirPlano('intermediario'), limiteExportacao, async (req, res) => {
     const { id, formato } = req.params;
     if (formato !== 'pdf') {
         return res.status(400).json({ erro: 'formato deve ser "pdf"' });

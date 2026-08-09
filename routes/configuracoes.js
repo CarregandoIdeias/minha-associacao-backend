@@ -3,6 +3,7 @@ const express = require('express');
 const { autenticar, bloquearSenhaProvisoria, bloquearTrialExpirado, exigirPlano, autorizar, comConexaoTenant } = require('../middleware/auth');
 const { registrarLogAuditoria } = require('../utils/auditoria');
 const { imagemBase64Valida } = require('../utils/validacao');
+const { limiteUpload } = require('../middleware/rateLimiter');
 
 const router = express.Router();
 router.use(autenticar);
@@ -85,7 +86,7 @@ router.get('/identidade', async (req, res) => {
 });
 
 // PUT /configuracoes/logo — só admin troca a logo da própria associação
-router.put('/logo', autorizar('admin'), async (req, res) => {
+router.put('/logo', autorizar('admin'), limiteUpload, async (req, res) => {
     const { logo_base64 } = req.body;
 
     if (!logo_base64) {

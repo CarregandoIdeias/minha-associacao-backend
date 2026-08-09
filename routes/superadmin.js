@@ -6,7 +6,7 @@ const crypto = require('crypto');
 const pool = require('../db');
 const config = require('../config/env');
 const { autenticarSuperAdmin, autorizarSuperAdmin, comConexaoSuperAdmin } = require('../middleware/auth');
-const { limiteLogin } = require('../middleware/rateLimiter');
+const { limiteLogin, limiteLoginPorConta, limiteExportacao, limiteUpload, limiteBootstrap } = require('../middleware/rateLimiter');
 const { emailValido, gerarSenhaProvisoria, cpfValido, senhaForte, imagemBase64Valida, inteiroPositivo } = require('../utils/validacao');
 const { registrarEventoAuth } = require('../utils/authLog');
 const { registrarLogAuditoria } = require('../utils/auditoria');
@@ -51,13 +51,27 @@ function segredoValido(recebido, esperado) {
     return crypto.timingSafeEqual(bufRecebido, bufEsperado);
 }
 
+// Hash descartável, mesmo padrão de HASH_INEXISTENTE em routes/auth.js
+// (auditoria de segurança Fase 2, 08/08/2026 -- SEC-011/SEC-024): gasta o
+// mesmo tempo de CPU do bcrypt.compare quando o e-mail de super-admin não
+// existe, pra essa diferença de tempo não denunciar quais e-mails de
+// super-admin existem na plataforma. Constante local a este arquivo (não
+// compartilhada com auth.js), mesmo padrão de constantes por arquivo já
+// usado no projeto.
+const HASH_INEXISTENTE_SUPERADMIN = bcrypt.hashSync('superadmin-inexistente-nunca-autentica', 10);
+
 // POST /superadmin/bootstrap
 // Cria o PRIMEIRO super-admin. Além de só funcionar se ainda não existir
 // nenhum (autodesabilita depois do primeiro uso), exige o segredo de setup
 // definido em BOOTSTRAP_SECRET — sem isso, quem descobrisse essa rota antes
 // de você rodar o bootstrap se tornaria dono da plataforma inteira.
 // super_admins não tem RLS, então pool.query direto é seguro aqui.
-router.post('/bootstrap', async (req, res) => {
+//
+// limiteBootstrap (auditoria de segurança Fase 2, 08/08/2026 -- SEC-012):
+// essa rota dá acesso total à plataforma pra quem acertar o
+// BOOTSTRAP_SECRET; timingSafeEqual já protege o segredo em si, mas não
+// custa nada também limitar a taxa de tentativas.
+router.post('/bootstrap', limiteBootstrap, async (req, res) => {
     const { nome, email, senha, bootstrap_secret } = req.body;
 
     if (!segredoValido(bootstrap_secret, config.bootstrapSecret)) {
@@ -69,8 +83,15 @@ router.post('/bootstrap', async (req, res) => {
     if (!emailValido(email)) {
         return res.status(400).json({ erro: 'e-mail inválido' });
     }
-    if (senha.length < 6) {
-        return res.status(400).json({ erro: 'senha deve ter ao menos 6 caracteres' });
+    // Mesma regra usada em toda troca de senha do projeto (auditoria de
+    // segurança Fase 2, 08/08/2026 -- SEC-019). Antes bastavam 6
+    // caracteres sem nenhuma outra exigência, na conta com poder sobre
+    // todos os tenants. Diferente das rotas que geram senha provisória
+    // aleatória, aqui é a própria pessoa escolhendo a senha definitiva na
+    // hora -- por isso não força deve_trocar_senha depois (ela já sabe a
+    // senha forte que acabou de escolher).
+    if (!senhaForte(senha)) {
+        return res.status(400).json({ erro: 'A senha deve ter ao menos 8 caracteres, com letra maiúscula, minúscula e número' });
     }
 
     try {
@@ -92,7 +113,12 @@ router.post('/bootstrap', async (req, res) => {
 });
 
 // POST /superadmin/login
-router.post('/login', limiteLogin, async (req, res) => {
+//
+// limiteLoginPorConta (auditoria de segurança Fase 2, 08/08/2026 --
+// SEC-013): limiteLogin sozinho é só por IP -- um atacante com muitos IPs
+// faz tentativas ilimitadas contra a mesma conta. Roda junto, não no
+// lugar: duas defesas independentes.
+router.post('/login', limiteLogin, limiteLoginPorConta, async (req, res) => {
     const { email, senha } = req.body;
 
     if (!email || !senha) {
@@ -100,12 +126,24 @@ router.post('/login', limiteLogin, async (req, res) => {
     }
 
     try {
+        // lower(email) (auditoria de segurança Fase 2, 08/08/2026 --
+        // SEC-011/SEC-024): antes era case-sensitive, inconsistente com
+        // /auth/login (que já usa lower(email) desde a migration de login
+        // por e-mail).
         const resultado = await pool.query(
-            `SELECT id, nome, email, senha_hash, papel, ativo, deve_trocar_senha FROM super_admins WHERE email = $1`,
+            `SELECT id, nome, email, senha_hash, papel, ativo, deve_trocar_senha FROM super_admins WHERE lower(email) = lower($1)`,
             [email]
         );
         const admin = resultado.rows[0];
         if (!admin || !admin.ativo) {
+            // Compara contra um hash descartável só pra gastar o mesmo
+            // tempo de CPU do caminho normal -- mesmo raciocínio de
+            // HASH_INEXISTENTE em routes/auth.js (auditoria de segurança
+            // Fase 2, 08/08/2026 -- SEC-011/SEC-024). Sem isso, a resposta
+            // volta bem mais rápido quando o e-mail não existe, e essa
+            // diferença de tempo sozinha já denuncia quais e-mails de
+            // super-admin existem na plataforma.
+            await bcrypt.compare(senha, HASH_INEXISTENTE_SUPERADMIN);
             await registrarLogAuditoria(pool, {
                 superAdminEmail: email, modulo: 'autenticacao', tipoAcao: 'login',
                 descricao: 'tentativa de login de super-admin falhou para ' + email, req,
@@ -150,6 +188,31 @@ router.post('/login', limiteLogin, async (req, res) => {
 
 // A partir daqui, todas as rotas exigem token de super-admin
 router.use(autenticarSuperAdmin);
+
+// POST /superadmin/logout — revoga de verdade (auditoria de segurança Fase
+// 2, 08/08/2026 -- SEC-004). Rota nova: até aqui superadmin.html só
+// limpava o localStorage, nunca chamava a API -- o token continuava
+// válido até expirar (até 8h) mesmo depois de clicar em "Sair". Mesmo
+// mecanismo de POST /auth/logout (sessoes_invalidas_antes_de comparado
+// com o iat do token em autenticarSuperAdmin, middleware/auth.js).
+// super_admins não tem RLS, pool.query direto é seguro aqui.
+router.post('/logout', async (req, res) => {
+    try {
+        await pool.query(
+            `UPDATE super_admins SET sessoes_invalidas_antes_de = now() WHERE id = $1`,
+            [req.superAdmin.id]
+        );
+        await registrarLogAuditoria(pool, {
+            superAdminId: req.superAdmin.id, superAdminNome: req.superAdmin.nome, superAdminEmail: req.superAdmin.email,
+            modulo: 'autenticacao', tipoAcao: 'logout',
+            descricao: req.superAdmin.nome + ' (super-admin) realizou logout', req,
+        });
+        res.json({ ok: true });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ erro: 'Erro ao encerrar sessão' });
+    }
+});
 
 // ---------- Gerenciamento de administradores da plataforma ----------
 // Restrito a quem tem papel 'super_admin' -- administrador/suporte são
@@ -699,7 +762,7 @@ router.get('/dashboard', async (req, res) => {
 // O e-mail principal da associação é o mesmo usado para o primeiro login do
 // admin — a senha é gerada automaticamente e devolvida uma única vez nesta
 // resposta (enquanto não há envio de e-mail integrado).
-router.post('/associacoes', autorizarSuperAdmin(...GESTAO), async (req, res) => {
+router.post('/associacoes', autorizarSuperAdmin(...GESTAO), limiteUpload, async (req, res) => {
     const {
         nome_associacao, tipo, email, telefone, endereco, cidade, estado, cep, site, cnpj, logo_base64,
         nome_admin, cpf,
@@ -810,7 +873,7 @@ router.post('/associacoes', autorizarSuperAdmin(...GESTAO), async (req, res) => 
 
 // PUT /superadmin/associacoes/:id — edita os dados de uma associação
 // (associacoes agora tem RLS real -> precisa da conexão de bypass do super-admin)
-router.put('/associacoes/:id', autorizarSuperAdmin(...GESTAO), async (req, res) => {
+router.put('/associacoes/:id', autorizarSuperAdmin(...GESTAO), limiteUpload, async (req, res) => {
     const { id } = req.params;
     const {
         nome, tipo, email, telefone, endereco, cidade, estado, cep, site, cnpj, logo_base64, ativo,
@@ -1034,7 +1097,7 @@ router.get('/logs', async (req, res) => {
 // GET /superadmin/logs/exportar/:formato — respeita os mesmos filtros da
 // listagem, sem paginação (limitado a LIMITE_EXPORTACAO linhas), e registra a
 // própria exportação como uma linha de auditoria (tipo_acao 'exportacao').
-router.get('/logs/exportar/:formato', autorizarSuperAdmin(...GESTAO), async (req, res) => {
+router.get('/logs/exportar/:formato', autorizarSuperAdmin(...GESTAO), limiteExportacao, async (req, res) => {
     const { formato } = req.params;
     if (formato !== 'pdf') {
         return res.status(400).json({ erro: 'formato deve ser "pdf"' });

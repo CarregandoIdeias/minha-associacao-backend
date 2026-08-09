@@ -9,6 +9,7 @@ const express = require('express');
 const { autenticar, bloquearSenhaProvisoria, autorizar, comConexaoTenant } = require('../middleware/auth');
 const { registrarLogAuditoria } = require('../utils/auditoria');
 const { comprovanteBase64Valido } = require('../utils/validacao');
+const { limiteUpload } = require('../middleware/rateLimiter');
 const {
     calcularValorMensalidade, statusAssinatura, alertaAssinatura, LIMITE_ASSOCIADOS_PLANO,
     PROXIMO_PLANO, alertaLimiteAssociados, planosGerenciaveis, planoMinimoParaComportar,
@@ -119,7 +120,7 @@ router.get('/', autorizar('admin', 'diretoria'), async (req, res) => {
 // POST /plano/solicitar-contratacao — associação envia comprovante de
 // pagamento pra contratar (do trial) ou trocar de plano (upgrade). Fica
 // "pendente" até o Super Admin aprovar (routes/superadmin.js).
-router.post('/solicitar-contratacao', autorizar('admin'), async (req, res) => {
+router.post('/solicitar-contratacao', autorizar('admin'), limiteUpload, async (req, res) => {
     const { plano_solicitado, comprovante_base64 } = req.body;
 
     if (!plano_solicitado || !PLANOS_CONTRATAVEIS.includes(plano_solicitado)) {
