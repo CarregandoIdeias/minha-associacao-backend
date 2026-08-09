@@ -2,9 +2,18 @@
 const jwt = require('jsonwebtoken');
 const pool = require('../db');
 const config = require('../config/env');
+const { planoAtendeNivel } = require('../utils/precos');
 
 const JWT_SECRET = config.jwtSecret;
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// Pequena espera entre tentativas de reconexão (ver comConexaoComSessao/
+// autenticar abaixo) -- dar um instante pro PgBouncer trocar de conexão
+// física antes de tentar de novo, em vez de bater imediatamente na mesma
+// conexão suspeita.
+function aguardar(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 // Verifica o token e disponibiliza os dados do usuário em req.usuario.
 // Também revalida contra o banco a cada requisição (usuário/associação
@@ -33,18 +42,19 @@ async function autenticar(req, res, next) {
         return res.status(401).json({ erro: 'Token inválido ou expirado' });
     }
 
-    // Falhas transitórias de conexão (raras, ainda sem causa confirmada --
-    // suspeita de instabilidade pontual na rota Render -> pooler do Supabase)
-    // já foram vistas derrubando essa consulta com um erro estranho mesmo com
-    // um payload válido. Uma nova tentativa, com uma conexão nova do pool,
-    // resolve o caso comum sem esconder uma falha real (só desiste após a
-    // segunda tentativa).
-    for (let tentativa = 1; tentativa <= 2; tentativa++) {
+    // Falhas transitórias de conexão (instabilidade pontual do pooler do
+    // Supabase, ver CLAUDE.md) já foram vistas derrubando essa consulta com
+    // um erro estranho mesmo com um payload válido. 3 tentativas (era 2),
+    // com uma pequena espera crescente entre elas e uma conexão nova do pool
+    // a cada vez, resolve o caso comum sem esconder uma falha real (só
+    // desiste depois da terceira).
+    const MAX_TENTATIVAS = 3;
+    for (let tentativa = 1; tentativa <= MAX_TENTATIVAS; tentativa++) {
         const client = await comConexaoAuth();
         try {
             const resultado = await client.query(
-                `SELECT u.ativo, u.papel, u.nome, a.ativo AS associacao_ativa,
-                        a.plano, a.trial_expira_em
+                `SELECT u.ativo, u.papel, u.nome, u.associacao_id, u.senha_alterada_em,
+                        a.ativo AS associacao_ativa, a.plano, a.trial_expira_em
                  FROM usuarios u
                  JOIN associacoes a ON a.id = u.associacao_id
                  WHERE u.id = $1`,
@@ -55,20 +65,51 @@ async function autenticar(req, res, next) {
                 return res.status(401).json({ erro: 'Token inválido ou expirado' });
             }
 
+            // Token emitido ANTES da última troca de senha não vale mais --
+            // sem isso, um token roubado continuava válido até expirar (até
+            // 8h) mesmo depois do dono trocar a senha por suspeitar de
+            // acesso indevido. payload.iat vem em segundos inteiros (padrão
+            // do jwt), senha_alterada_em em milissegundos -- comparar os
+            // dois arredondados pro mesmo segundo (Math.floor do lado do
+            // timestamp) evita rejeitar o próprio token novo emitido no
+            // mesmo request que troca a senha, quando os dois caem no mesmo
+            // segundo (bug real encontrado testando: o token reemitido por
+            // PUT /auth/senha/PUT /superadmin/perfil/senha vinha inválido).
+            if (usuario.senha_alterada_em && payload.iat < Math.floor(new Date(usuario.senha_alterada_em).getTime() / 1000)) {
+                return res.status(401).json({ erro: 'Token inválido ou expirado' });
+            }
+
             // { id, associacao_id, papel, email, deve_trocar_senha, nome, plano,
             // trial_expira_em } — papel/nome/plano/trial_expira_em vêm frescos do
             // banco, não do token, para uma troca de papel, nome ou a expiração do
             // trial valerem na hora (nome também usado pro snapshot em
             // atividades, ver utils/atividadeLog.js; plano/trial_expira_em usados
             // por bloquearTrialExpirado abaixo).
-            req.usuario = { ...payload, papel: usuario.papel, nome: usuario.nome, plano: usuario.plano, trial_expira_em: usuario.trial_expira_em };
+            //
+            // associacao_id TAMBÉM vem do banco desde a auditoria de 07/08/2026.
+            // Antes era o único campo do token que ficava valendo sem
+            // revalidação -- e é justamente a chave do isolamento entre tenants
+            // (vira o SET de RLS em comConexaoTenant e o `WHERE associacao_id`
+            // de toda query). Não era explorável (o token é assinado, ninguém
+            // forja esse valor), mas era o campo onde ficar desatualizado
+            // significaria uma associação enxergando dado de outra -- caro
+            // demais pra depender de "nada muda esse campo hoje".
+            req.usuario = {
+                ...payload,
+                associacao_id: usuario.associacao_id,
+                papel: usuario.papel,
+                nome: usuario.nome,
+                plano: usuario.plano,
+                trial_expira_em: usuario.trial_expira_em,
+            };
             return next();
         } catch (err) {
-            if (tentativa === 2) {
+            if (tentativa === MAX_TENTATIVAS) {
                 console.error(err);
                 return res.status(500).json({ erro: 'Erro ao validar sessão' });
             }
-            console.error('autenticar: 1a tentativa falhou, tentando de novo com conexao nova:', err.message);
+            console.error('autenticar: tentativa ' + tentativa + ' falhou, tentando de novo com conexao nova:', err.message);
+            await aguardar(150 * tentativa);
         } finally {
             client.release();
         }
@@ -102,6 +143,26 @@ function bloquearTrialExpirado(req, res, next) {
     next();
 }
 
+// Bloqueia uma funcionalidade que exige um plano superior ao contratado
+// (gating por plano, 29/07/2026 — ver painel/CLAUDE.md/backend/CLAUDE.md,
+// seção "Gating de funcionalidades por plano"). Usar depois de autorizar()
+// nas rotas que só devem funcionar a partir de um plano mínimo. Diferente
+// de bloquearTrialExpirado: aqui a associação continua com acesso normal
+// à plataforma, só essa funcionalidade específica fica indisponível.
+// req.usuario.plano já vem sempre fresco do banco (ver autenticar() acima).
+function exigirPlano(nivelMinimo) {
+    return (req, res, next) => {
+        if (!req.usuario || !planoAtendeNivel(req.usuario.plano, nivelMinimo)) {
+            return res.status(403).json({
+                erro: 'Esse recurso não está disponível no seu plano atual. Faça upgrade para continuar.',
+                codigo: 'PLANO_INSUFICIENTE',
+                plano_necessario: nivelMinimo,
+            });
+        }
+        next();
+    };
+}
+
 // Garante que só determinados papéis acessem a rota
 // Uso: autorizar('admin', 'diretoria')
 function autorizar(...papeisPermitidos) {
@@ -125,7 +186,8 @@ function autorizar(...papeisPermitidos) {
 // requisição ficava pendurada até o timeout do navegador, sem erro nenhum.
 // (A rede de segurança para qualquer outro caso está em server.js.)
 async function comConexaoComSessao(sqlSet, valores) {
-    for (let tentativa = 1; tentativa <= 2; tentativa++) {
+    const MAX_TENTATIVAS = 3;
+    for (let tentativa = 1; tentativa <= MAX_TENTATIVAS; tentativa++) {
         const client = await pool.connect();
         try {
             await client.query(sqlSet, valores);
@@ -134,10 +196,42 @@ async function comConexaoComSessao(sqlSet, valores) {
             // destroy() em vez de release(): a conexão está suspeita, não pode
             // voltar para o pool e derrubar a próxima requisição também.
             client.release(err);
-            if (tentativa === 2) throw err;
-            console.error('conexao do pool veio inutilizavel, tentando outra:', err.message);
+            if (tentativa === MAX_TENTATIVAS) throw err;
+            console.error('conexao do pool veio inutilizavel, tentando outra (tentativa ' + tentativa + '):', err.message);
+            await aguardar(150 * tentativa);
         }
     }
+}
+
+// Uuid sentinela para "nenhum tenant nesta conexão". Não dá pra usar NULL:
+// set_config(x, NULL, false) equivale a um RESET, e um GUC customizado
+// resetado passa a devolver STRING VAZIA -- que é exatamente a causa raiz da
+// instabilidade histórica (ver migration 20260807000000). Um uuid que nunca
+// existe casta sem erro e não casa nenhuma linha, com ou sem aquela migration
+// aplicada.
+const TENANT_NENHUM = '00000000-0000-0000-0000-000000000000';
+
+// TODA conexão precisa declarar as três flags, sempre -- não só a sua.
+//
+// Achado no QA de 07/08/2026: as flags são de SESSÃO (is_local = false) e o
+// client.release() devolve a conexão pro pool SEM limpar nada. Como o pool
+// reaproveita a mesma conexão física, uma requisição de super-admin deixava
+// `app.superadmin_bypass = 'true'` grudado, e a PRÓXIMA requisição de tenant
+// naquela conexão rodava com o bypass ligado -- ou seja, com o RLS
+// efetivamente desligado. Confirmado na prática: tenant A enxergando os
+// associados de B.
+//
+// Nunca virou vazamento de dado porque toda query da aplicação também filtra
+// por `WHERE associacao_id = $1` na mão. Mas o RLS é justamente a camada que
+// deveria segurar quando esse filtro faltar (ou for esquecido numa rota nova),
+// e ela estava valendo só por sorte.
+function sqlSessao({ tenant = TENANT_NENHUM, superadmin = false, auth = false }) {
+    return {
+        sql: `SELECT set_config('app.current_associacao_id', $1, false),
+                     set_config('app.superadmin_bypass', $2, false),
+                     set_config('app.auth_bypass', $3, false)`,
+        valores: [tenant, superadmin ? 'true' : 'false', auth ? 'true' : 'false'],
+    };
 }
 
 // Abre uma conexão dedicada do pool e ativa o isolamento por tenant (RLS).
@@ -147,7 +241,8 @@ async function comConexaoTenant(associacaoId) {
     if (!UUID_REGEX.test(associacaoId)) {
         throw new Error('associacaoId inválido');
     }
-    return comConexaoComSessao(`SELECT set_config('app.current_associacao_id', $1, false)`, [associacaoId]);
+    const { sql, valores } = sqlSessao({ tenant: associacaoId });
+    return comConexaoComSessao(sql, valores);
 }
 
 // Verifica o token de SUPER-ADMIN (separado do login das associações) e
@@ -177,35 +272,53 @@ async function autenticarSuperAdmin(req, res, next) {
         return res.status(401).json({ erro: 'Token inválido ou expirado' });
     }
 
-    try {
-        const resultado = await pool.query(
-            `SELECT nome, papel, ativo, deve_trocar_senha FROM super_admins WHERE id = $1`,
-            [payload.id]
-        );
-        const admin = resultado.rows[0];
-        if (!admin || !admin.ativo) {
-            return res.status(401).json({ erro: 'Token inválido ou expirado' });
-        }
-        // { id, email, tipo, papel, nome } -- papel/nome vêm frescos do banco,
-        // não do token, para uma troca de nível de permissão valer na hora.
-        req.superAdmin = { ...payload, papel: admin.papel, nome: admin.nome };
+    // Mesma instabilidade transitória do pooler documentada em autenticar()
+    // acima -- esta rota não tinha retry nenhum antes, apesar de mostrar a
+    // mesma mensagem "Erro ao validar sessão" quando falhava.
+    const MAX_TENTATIVAS = 3;
+    for (let tentativa = 1; tentativa <= MAX_TENTATIVAS; tentativa++) {
+        try {
+            const resultado = await pool.query(
+                `SELECT nome, papel, ativo, deve_trocar_senha, senha_alterada_em FROM super_admins WHERE id = $1`,
+                [payload.id]
+            );
+            const admin = resultado.rows[0];
+            if (!admin || !admin.ativo) {
+                return res.status(401).json({ erro: 'Token inválido ou expirado' });
+            }
 
-        // Senha provisória pendente bloqueia tudo, menos a própria troca de
-        // senha -- equivalente ao bloquearSenhaProvisoria dos usuários comuns.
-        // Sem isso, a senha provisória (mostrada uma vez e repassada por fora,
-        // por WhatsApp/e-mail) valia pra sempre via chamada direta à API, já
-        // que só o front-end pedia a troca.
-        if (admin.deve_trocar_senha && !(req.method === 'PUT' && req.path === '/perfil/senha')) {
-            return res.status(403).json({
-                erro: 'Você precisa definir uma nova senha antes de continuar',
-                codigo: 'SENHA_PROVISORIA_PENDENTE',
-            });
-        }
+            // Mesmo raciocínio (e mesmo cuidado de arredondamento) de
+            // autenticar() acima: token emitido antes da última troca de
+            // senha não vale mais.
+            if (admin.senha_alterada_em && payload.iat < Math.floor(new Date(admin.senha_alterada_em).getTime() / 1000)) {
+                return res.status(401).json({ erro: 'Token inválido ou expirado' });
+            }
 
-        next();
-    } catch (err) {
-        console.error(err);
-        return res.status(500).json({ erro: 'Erro ao validar sessão' });
+            // { id, email, tipo, papel, nome } -- papel/nome vêm frescos do banco,
+            // não do token, para uma troca de nível de permissão valer na hora.
+            req.superAdmin = { ...payload, papel: admin.papel, nome: admin.nome };
+
+            // Senha provisória pendente bloqueia tudo, menos a própria troca de
+            // senha -- equivalente ao bloquearSenhaProvisoria dos usuários comuns.
+            // Sem isso, a senha provisória (mostrada uma vez e repassada por fora,
+            // por WhatsApp/e-mail) valia pra sempre via chamada direta à API, já
+            // que só o front-end pedia a troca.
+            if (admin.deve_trocar_senha && !(req.method === 'PUT' && req.path === '/perfil/senha')) {
+                return res.status(403).json({
+                    erro: 'Você precisa definir uma nova senha antes de continuar',
+                    codigo: 'SENHA_PROVISORIA_PENDENTE',
+                });
+            }
+
+            return next();
+        } catch (err) {
+            if (tentativa === MAX_TENTATIVAS) {
+                console.error(err);
+                return res.status(500).json({ erro: 'Erro ao validar sessão' });
+            }
+            console.error('autenticarSuperAdmin: tentativa ' + tentativa + ' falhou, tentando de novo:', err.message);
+            await aguardar(150 * tentativa);
+        }
     }
 }
 
@@ -225,7 +338,8 @@ function autorizarSuperAdmin(...papeisPermitidos) {
 // dados de todas as associações. A flag só é setada aqui, nunca a partir de
 // input do usuário — é isso que torna o bypass seguro.
 async function comConexaoSuperAdmin() {
-    return comConexaoComSessao(`SELECT set_config('app.superadmin_bypass', 'true', false)`);
+    const { sql, valores } = sqlSessao({ superadmin: true });
+    return comConexaoComSessao(sql, valores);
 }
 
 // Abre uma conexão dedicada com bypass para os fluxos públicos de
@@ -235,13 +349,15 @@ async function comConexaoSuperAdmin() {
 // descobrindo). Mesmo princípio de segurança do comConexaoSuperAdmin: a
 // flag nunca vem de input do usuário, só é setada por este código.
 async function comConexaoAuth() {
-    return comConexaoComSessao(`SELECT set_config('app.auth_bypass', 'true', false)`);
+    const { sql, valores } = sqlSessao({ auth: true });
+    return comConexaoComSessao(sql, valores);
 }
 
 module.exports = {
     autenticar,
     bloquearSenhaProvisoria,
     bloquearTrialExpirado,
+    exigirPlano,
     autorizar,
     comConexaoTenant,
     autenticarSuperAdmin,

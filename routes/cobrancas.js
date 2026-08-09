@@ -3,15 +3,23 @@ const express = require('express');
 const { autenticar, bloquearSenhaProvisoria, bloquearTrialExpirado, autorizar, comConexaoTenant } = require('../middleware/auth');
 const { registrarAtividade } = require('../utils/atividadeLog');
 const { registrarLogAuditoria } = require('../utils/auditoria');
+const { inteiroPositivo, uuidValido, dataValida, valorMonetarioValido } = require('../utils/validacao');
 
+const paramUuid = require('../middleware/paramUuid');
 const router = express.Router();
+// Rejeita :id que nao seja uuid com 400, em vez de deixar virar 500 no Postgres
+router.param('id', paramUuid);
 router.use(autenticar);
 router.use(bloquearSenhaProvisoria);
 router.use(bloquearTrialExpirado);
 
 // GET /cobrancas — lista cobranças da associação, com filtro opcional por status ou associado (só admin/diretoria)
-router.get('/', autorizar('admin', 'diretoria'), async (req, res) => {
-    const { status, associado_id } = req.query;
+//
+// Paginação é opt-in via ?pagina=/?por_pagina=, mesmo raciocínio de
+// GET /associados (ver comentário lá) -- o Dashboard e os gráficos de
+// receita mensal dependem do array completo em cobrancasCache.
+router.get('/', autorizar('admin', 'diretoria', 'financeiro', 'atendimento', 'operador', 'consulta'), async (req, res) => {
+    const { status, associado_id, pagina, por_pagina } = req.query;
     const client = await comConexaoTenant(req.usuario.associacao_id);
     try {
         const condicoes = [];
@@ -30,6 +38,25 @@ router.get('/', autorizar('admin', 'diretoria'), async (req, res) => {
         }
 
         const where = `WHERE ${condicoes.join(' AND ')}`;
+        const paginado = pagina != null || por_pagina != null;
+
+        let total = null;
+        let limitOffsetSql = '';
+        let valoresConsulta = valores;
+        if (paginado) {
+            const limite = inteiroPositivo(por_pagina, 50, 200);
+            const paginaAtual = Math.max(parseInt(pagina, 10) || 1, 1);
+            const offset = (paginaAtual - 1) * limite;
+
+            const totalResultado = await client.query(
+                `SELECT COUNT(*) AS total FROM cobrancas c ${where}`,
+                valores
+            );
+            total = { total: parseInt(totalResultado.rows[0].total, 10), pagina: paginaAtual, por_pagina: limite };
+
+            valoresConsulta = [...valores, limite, offset];
+            limitOffsetSql = ` LIMIT $${valoresConsulta.length - 1} OFFSET $${valoresConsulta.length}`;
+        }
 
         const resultado = await client.query(
             `SELECT c.id, c.descricao, c.valor, c.vencimento, c.status, c.metodo,
@@ -40,8 +67,8 @@ router.get('/', autorizar('admin', 'diretoria'), async (req, res) => {
              JOIN associados a ON a.id = c.associado_id
              LEFT JOIN pagamentos p ON p.cobranca_id = c.id
              ${where}
-             ORDER BY c.vencimento DESC`,
-            valores
+             ORDER BY c.vencimento DESC${limitOffsetSql}`,
+            valoresConsulta
         );
 
         const configAssociacao = await client.query(
@@ -70,6 +97,9 @@ router.get('/', autorizar('admin', 'diretoria'), async (req, res) => {
             return { ...linha, status_exibicao: 'pendente', dias_restantes: diasRestantes };
         });
 
+        if (total) {
+            return res.json({ registros: linhas, total: total.total, pagina: total.pagina, por_pagina: total.por_pagina });
+        }
         res.json(linhas);
     } catch (err) {
         console.error(err);
@@ -80,18 +110,40 @@ router.get('/', autorizar('admin', 'diretoria'), async (req, res) => {
 });
 
 // POST /cobrancas — cria uma nova cobrança (só admin/diretoria)
-router.post('/', autorizar('admin', 'diretoria'), async (req, res) => {
+router.post('/', autorizar('admin', 'diretoria', 'financeiro', 'operador'), async (req, res) => {
     const { associado_id, descricao, valor, vencimento } = req.body;
 
     if (!associado_id || !valor || !vencimento) {
         return res.status(400).json({ erro: 'associado_id, valor e vencimento são obrigatórios' });
     }
-    if (isNaN(parseFloat(valor)) || parseFloat(valor) < 0) {
-        return res.status(400).json({ erro: 'valor inválido' });
+    if (!uuidValido(associado_id)) {
+        return res.status(400).json({ erro: 'associado_id inválido' });
+    }
+    if (!valorMonetarioValido(valor)) {
+        return res.status(400).json({ erro: 'valor inválido (máx. R$ 1.000.000,00, com até 2 casas decimais)' });
+    }
+    if (!dataValida(vencimento)) {
+        return res.status(400).json({ erro: 'vencimento inválido' });
     }
 
     const client = await comConexaoTenant(req.usuario.associacao_id);
     try {
+        // O associado precisa ser DESTA associação. Sem essa checagem (achado
+        // do QA de 07/08/2026) dava pra criar uma cobrança apontando pro
+        // associado de outra associação: o INSERT passava, porque a FK só
+        // confere que a linha existe e o RLS só olha o associacao_id da
+        // própria cobrança. O resultado era uma linha órfã que NENHUM dos dois
+        // tenants enxergava (some do JOIN com associados dos dois lados) --
+        // e, de quebra, o 201-vs-erro respondia se um uuid qualquer é
+        // associado em alguma associação da plataforma.
+        const associado = await client.query(
+            `SELECT id FROM associados WHERE id = $1 AND associacao_id = $2`,
+            [associado_id, req.usuario.associacao_id]
+        );
+        if (associado.rows.length === 0) {
+            return res.status(404).json({ erro: 'Associado não encontrado' });
+        }
+
         const resultado = await client.query(
             `INSERT INTO cobrancas (associacao_id, associado_id, descricao, valor, vencimento)
              VALUES ($1, $2, $3, $4, $5)
@@ -114,7 +166,7 @@ router.post('/', autorizar('admin', 'diretoria'), async (req, res) => {
 });
 
 // PATCH /cobrancas/:id/pagar — marca uma cobrança como paga manualmente
-router.patch('/:id/pagar', autorizar('admin', 'diretoria'), async (req, res) => {
+router.patch('/:id/pagar', autorizar('admin', 'diretoria', 'financeiro', 'operador'), async (req, res) => {
     const { id } = req.params;
     const { metodo } = req.body;
 
@@ -221,7 +273,7 @@ router.patch('/:id/estornar', autorizar('admin'), async (req, res) => {
 });
 
 // GET /cobrancas/:id/comprovante — retorna o comprovante enviado pelo associado (admin/diretoria)
-router.get('/:id/comprovante', autorizar('admin', 'diretoria'), async (req, res) => {
+router.get('/:id/comprovante', autorizar('admin', 'diretoria', 'financeiro', 'atendimento', 'operador', 'consulta'), async (req, res) => {
     const { id } = req.params;
     res.set('Cache-Control', 'no-store');
     const client = await comConexaoTenant(req.usuario.associacao_id);
@@ -243,15 +295,18 @@ router.get('/:id/comprovante', autorizar('admin', 'diretoria'), async (req, res)
 });
 
 // PUT /cobrancas/:id — edita uma cobrança (só se ainda não estiver paga)
-router.put('/:id', autorizar('admin', 'diretoria'), async (req, res) => {
+router.put('/:id', autorizar('admin', 'diretoria', 'financeiro', 'operador'), async (req, res) => {
     const { id } = req.params;
     const { descricao, valor, vencimento } = req.body;
 
     if (!valor || !vencimento) {
         return res.status(400).json({ erro: 'valor e vencimento são obrigatórios' });
     }
-    if (isNaN(parseFloat(valor)) || parseFloat(valor) < 0) {
-        return res.status(400).json({ erro: 'valor inválido' });
+    if (!valorMonetarioValido(valor)) {
+        return res.status(400).json({ erro: 'valor inválido (máx. R$ 1.000.000,00, com até 2 casas decimais)' });
+    }
+    if (!dataValida(vencimento)) {
+        return res.status(400).json({ erro: 'vencimento inválido' });
     }
 
     const client = await comConexaoTenant(req.usuario.associacao_id);

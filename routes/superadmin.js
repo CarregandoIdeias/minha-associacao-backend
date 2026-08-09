@@ -7,13 +7,16 @@ const pool = require('../db');
 const config = require('../config/env');
 const { autenticarSuperAdmin, autorizarSuperAdmin, comConexaoSuperAdmin } = require('../middleware/auth');
 const { limiteLogin } = require('../middleware/rateLimiter');
-const { emailValido, gerarSenhaProvisoria, cpfValido, senhaForte, imagemBase64Valida } = require('../utils/validacao');
+const { emailValido, gerarSenhaProvisoria, cpfValido, senhaForte, imagemBase64Valida, inteiroPositivo } = require('../utils/validacao');
 const { registrarEventoAuth } = require('../utils/authLog');
 const { registrarLogAuditoria } = require('../utils/auditoria');
 const { calcularValorMensalidade, statusAssinatura } = require('../utils/precos');
-const { gerarExcelLogs, gerarPdfLogs } = require('../utils/exportarLogs');
+const { gerarPdfLogs } = require('../utils/exportarLogs');
 
 const FORMAS_COBRANCA_VALIDAS = ['pix', 'boleto', 'cartao', 'dinheiro', 'outro'];
+// Opções fechadas (não é um intervalo livre) -- pedido explícito do item de
+// sprint 1.4, pra manter o dropdown do formulário previsível.
+const DIAS_ALERTA_ASSINATURA_VALIDOS = [30, 20, 15, 10, 7, 3];
 const PAPEIS_SUPERADMIN_VALIDOS = ['super_admin', 'administrador', 'suporte'];
 
 // Modelo de permissão dos níveis da plataforma (menor privilégio):
@@ -32,7 +35,10 @@ const PAPEIS_SUPERADMIN_VALIDOS = ['super_admin', 'administrador', 'suporte'];
 // de qualquer cliente, recebendo a senha nova na resposta.
 const GESTAO = ['super_admin', 'administrador'];
 
+const paramUuid = require('../middleware/paramUuid');
 const router = express.Router();
+// Rejeita :id que nao seja uuid com 400, em vez de deixar virar 500 no Postgres
+router.param('id', paramUuid);
 const JWT_SECRET = config.jwtSecret;
 
 // Compara em tempo constante para não vazar, por timing, quantos caracteres
@@ -152,7 +158,7 @@ router.use(autenticarSuperAdmin);
 // GET /superadmin/admins — lista os administradores da plataforma
 router.get('/admins', autorizarSuperAdmin('super_admin'), async (req, res) => {
     try {
-        const limite = Math.min(parseInt(req.query.limite, 10) || 100, 1000);
+        const limite = inteiroPositivo(req.query.limite, 100, 1000);
         const resultado = await pool.query(
             `SELECT id, nome, email, papel, ativo, criado_em FROM super_admins ORDER BY criado_em DESC LIMIT $1`,
             [limite]
@@ -311,7 +317,7 @@ router.patch('/admins/:id/senha', autorizarSuperAdmin('super_admin'), async (req
 
     try {
         const resultado = await pool.query(
-            `UPDATE super_admins SET senha_hash = $1, deve_trocar_senha = true WHERE id = $2 RETURNING id, nome, email`,
+            `UPDATE super_admins SET senha_hash = $1, deve_trocar_senha = true, senha_alterada_em = now() WHERE id = $2 RETURNING id, nome, email`,
             [senhaHash, id]
         );
         if (resultado.rows.length === 0) {
@@ -356,7 +362,7 @@ router.put('/perfil/senha', async (req, res) => {
 
         const novoHash = await bcrypt.hash(senha_nova, 10);
         await pool.query(
-            `UPDATE super_admins SET senha_hash = $1, deve_trocar_senha = false WHERE id = $2`,
+            `UPDATE super_admins SET senha_hash = $1, deve_trocar_senha = false, senha_alterada_em = now() WHERE id = $2`,
             [novoHash, req.superAdmin.id]
         );
         await registrarLogAuditoria(pool, {
@@ -365,7 +371,16 @@ router.put('/perfil/senha', async (req, res) => {
             descricao: req.superAdmin.nome + ' alterou a própria senha', req,
         });
 
-        res.json({ ok: true });
+        // Reemite o token -- o antigo acabou de virar inválido (ver
+        // senha_alterada_em em middleware/auth.js), senão a própria pessoa
+        // ficaria "deslogada" na próxima ação sem nenhum aviso.
+        const novoToken = jwt.sign(
+            { id: req.superAdmin.id, email: req.superAdmin.email, tipo: 'superadmin' },
+            JWT_SECRET,
+            { expiresIn: '8h' }
+        );
+
+        res.json({ ok: true, token: novoToken });
     } catch (err) {
         console.error(err);
         res.status(500).json({ erro: 'Erro ao trocar senha' });
@@ -401,7 +416,7 @@ router.get('/associacoes', async (req, res) => {
         if (status === 'inativo') condicoes.push(`a.ativo = false`);
 
         const where = condicoes.length ? `WHERE ${condicoes.join(' AND ')}` : '';
-        const limiteSql = limite ? `LIMIT ${Math.min(parseInt(limite, 10), 1000)}` : '';
+        const limiteSql = limite ? `LIMIT ${inteiroPositivo(limite, 100, 1000)}` : '';
 
         const resultado = await client.query(`
             SELECT a.id, a.nome, a.tipo, a.email, a.telefone, a.endereco, a.cidade, a.estado, a.cep, a.site, a.cnpj,
@@ -528,7 +543,7 @@ router.patch('/associacoes/:id/resetar-senha-admin', autorizarSuperAdmin(...GEST
     const client = await comConexaoSuperAdmin();
     try {
         const resultado = await client.query(
-            `UPDATE usuarios SET senha_hash = $1, deve_trocar_senha = true
+            `UPDATE usuarios SET senha_hash = $1, deve_trocar_senha = true, senha_alterada_em = now()
              WHERE associacao_id = $2 AND papel = 'admin'
              RETURNING id, email`,
             [senhaHash, id]
@@ -688,7 +703,7 @@ router.post('/associacoes', autorizarSuperAdmin(...GESTAO), async (req, res) => 
     const {
         nome_associacao, tipo, email, telefone, endereco, cidade, estado, cep, site, cnpj, logo_base64,
         nome_admin, cpf,
-        plano, valor_mensalidade_manual, vencimento_assinatura, forma_cobranca, trial_dias
+        plano, valor_mensalidade_manual, vencimento_assinatura, forma_cobranca, trial_dias, dias_alerta_assinatura
     } = req.body;
 
     if (!nome_associacao || !nome_admin || !email) {
@@ -706,6 +721,17 @@ router.post('/associacoes', autorizarSuperAdmin(...GESTAO), async (req, res) => 
     const diasTrial = trial_dias ? parseInt(trial_dias, 10) : 15;
     if (isNaN(diasTrial) || diasTrial < 1 || diasTrial > 365) {
         return res.status(400).json({ erro: 'trial_dias deve ser um número entre 1 e 365' });
+    }
+    const diasAlertaAssinatura = dias_alerta_assinatura ? parseInt(dias_alerta_assinatura, 10) : 30;
+    if (!DIAS_ALERTA_ASSINATURA_VALIDOS.includes(diasAlertaAssinatura)) {
+        return res.status(400).json({ erro: 'dias_alerta_assinatura deve ser um destes valores: ' + DIAS_ALERTA_ASSINATURA_VALIDOS.join(', ') });
+    }
+    // Limite de ~2MB em base64, mesmo padrão de PUT /configuracoes/logo
+    // (achado na auditoria de segurança de 29/07/2026 -- essa rota aceitava
+    // logo de qualquer tamanho, inconsistente com toda outra rota de
+    // upload de imagem do sistema).
+    if (logo_base64 && logo_base64.length > 2_800_000) {
+        return res.status(400).json({ erro: 'Imagem muito grande. Escolha uma logo menor.' });
     }
     if (logo_base64 && !imagemBase64Valida(logo_base64)) {
         return res.status(400).json({ erro: 'Logo inválida. Envie PNG, JPG, GIF ou WEBP.' });
@@ -731,13 +757,13 @@ router.post('/associacoes', autorizarSuperAdmin(...GESTAO), async (req, res) => 
         const associacao = await client.query(
             `INSERT INTO associacoes (nome, tipo, email, telefone, endereco, cidade, estado, cep, site, cnpj, logo_url,
                                        plano, valor_mensalidade_manual, vencimento_assinatura, forma_cobranca,
-                                       trial_dias, trial_expira_em)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+                                       trial_dias, trial_expira_em, dias_alerta_assinatura)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
              RETURNING id`,
             [nome_associacao, tipo || 'outra', email, telefone || null, endereco || null, cidade || null, estado || null,
                 cep || null, site || null, cnpj || null, logo_base64 || null,
                 planoFinal, valor_mensalidade_manual || null, vencimento_assinatura || null, forma_cobranca || null,
-                diasTrial, trialExpiraEm]
+                diasTrial, trialExpiraEm, diasAlertaAssinatura]
         );
         const associacaoId = associacao.rows[0].id;
 
@@ -788,7 +814,8 @@ router.put('/associacoes/:id', autorizarSuperAdmin(...GESTAO), async (req, res) 
     const { id } = req.params;
     const {
         nome, tipo, email, telefone, endereco, cidade, estado, cep, site, cnpj, logo_base64, ativo,
-        plano, valor_mensalidade_manual, vencimento_assinatura, forma_cobranca, cpf, trial_dias, trial_expira_em
+        plano, valor_mensalidade_manual, vencimento_assinatura, forma_cobranca, cpf, trial_dias, trial_expira_em,
+        dias_alerta_assinatura
     } = req.body;
 
     if (!nome || !nome.trim()) {
@@ -803,6 +830,15 @@ router.put('/associacoes/:id', autorizarSuperAdmin(...GESTAO), async (req, res) 
     if (trial_dias !== undefined && trial_dias !== null && (isNaN(parseInt(trial_dias, 10)) || trial_dias < 1 || trial_dias > 365)) {
         return res.status(400).json({ erro: 'trial_dias deve ser um número entre 1 e 365' });
     }
+    if (dias_alerta_assinatura !== undefined && dias_alerta_assinatura !== null
+        && !DIAS_ALERTA_ASSINATURA_VALIDOS.includes(parseInt(dias_alerta_assinatura, 10))) {
+        return res.status(400).json({ erro: 'dias_alerta_assinatura deve ser um destes valores: ' + DIAS_ALERTA_ASSINATURA_VALIDOS.join(', ') });
+    }
+    // Limite de ~2MB em base64, mesmo padrão de PUT /configuracoes/logo
+    // (achado na auditoria de segurança de 29/07/2026).
+    if (logo_base64 && logo_base64.length > 2_800_000) {
+        return res.status(400).json({ erro: 'Imagem muito grande. Escolha uma logo menor.' });
+    }
     if (logo_base64 && !imagemBase64Valida(logo_base64)) {
         return res.status(400).json({ erro: 'Logo inválida. Envie PNG, JPG, GIF ou WEBP.' });
     }
@@ -814,7 +850,7 @@ router.put('/associacoes/:id', autorizarSuperAdmin(...GESTAO), async (req, res) 
         const anterior = await client.query(
             `SELECT nome, tipo, email, telefone, endereco, cidade, estado, cnpj, ativo,
                     cep, site, plano, valor_mensalidade_manual, vencimento_assinatura, forma_cobranca,
-                    trial_dias, trial_expira_em
+                    trial_dias, trial_expira_em, dias_alerta_assinatura
              FROM associacoes WHERE id = $1`,
             [id]
         );
@@ -830,15 +866,16 @@ router.put('/associacoes/:id', autorizarSuperAdmin(...GESTAO), async (req, res) 
                  cep = $10, site = $11, logo_url = COALESCE($12, logo_url),
                  plano = COALESCE($13, plano), valor_mensalidade_manual = $14,
                  vencimento_assinatura = $15, forma_cobranca = $16,
-                 trial_dias = COALESCE($18, trial_dias), trial_expira_em = COALESCE($19, trial_expira_em)
+                 trial_dias = COALESCE($18, trial_dias), trial_expira_em = COALESCE($19, trial_expira_em),
+                 dias_alerta_assinatura = COALESCE($20, dias_alerta_assinatura)
              WHERE id = $17
              RETURNING id, nome, tipo, email, telefone, endereco, cidade, estado, cnpj, ativo,
                        cep, site, logo_url, plano, valor_mensalidade_manual, vencimento_assinatura, forma_cobranca,
-                       trial_dias, trial_expira_em`,
+                       trial_dias, trial_expira_em, dias_alerta_assinatura`,
             [nome.trim(), tipo || null, email || null, telefone || null, endereco || null, cidade || null, estado || null, cnpj || null, ativo,
                 cep || null, site || null, logo_base64 || null,
                 plano || null, valor_mensalidade_manual || null, vencimento_assinatura || null, forma_cobranca || null, id,
-                trial_dias || null, trial_expira_em || null]
+                trial_dias || null, trial_expira_em || null, dias_alerta_assinatura ? parseInt(dias_alerta_assinatura, 10) : null]
         );
 
         if (cpf) {
@@ -848,11 +885,19 @@ router.put('/associacoes/:id', autorizarSuperAdmin(...GESTAO), async (req, res) 
             );
         }
 
+        // logo_url fora do log de auditoria de propósito (achado na
+        // auditoria de segurança de 29/07/2026) -- é a logo inteira em
+        // base64 (pode ter MBs), gravada em logs_auditoria.dados_novos a
+        // cada edição mesmo quando a edição não mexeu na logo, e
+        // logs_auditoria nunca é limpa (associacao_id usa ON DELETE SET
+        // NULL, não CASCADE). `anterior` já nem seleciona logo_url, por
+        // isso; aqui precisa excluir explicitamente do RETURNING da UPDATE.
+        const { logo_url, ...dadosNovosSemLogo } = resultado.rows[0];
         await registrarLogAuditoria(client, {
             associacaoId: id, superAdminId: req.superAdmin.id, superAdminNome: req.superAdmin.nome, superAdminEmail: req.superAdmin.email,
             modulo: 'associacoes', tipoAcao: 'edicao',
             descricao: req.superAdmin.nome + ' editou a associação "' + resultado.rows[0].nome + '"',
-            dadosAnteriores: anterior.rows[0], dadosNovos: resultado.rows[0], req,
+            dadosAnteriores: anterior.rows[0], dadosNovos: dadosNovosSemLogo, req,
         });
 
         await client.query('COMMIT');
@@ -949,8 +994,8 @@ router.get('/logs', async (req, res) => {
         // senão, usa paginação normal com por_pagina/pagina.
         const usandoLimiteSimples = limiteQuery && !pagina && !por_pagina;
         const limite = usandoLimiteSimples
-            ? Math.min(parseInt(limiteQuery, 10), 100)
-            : Math.min(parseInt(por_pagina, 10) || 50, 200);
+            ? inteiroPositivo(limiteQuery, 100, 100)
+            : inteiroPositivo(por_pagina, 50, 200);
         const paginaAtual = usandoLimiteSimples ? 1 : Math.max(parseInt(pagina, 10) || 1, 1);
         const offset = (paginaAtual - 1) * limite;
 
@@ -991,8 +1036,8 @@ router.get('/logs', async (req, res) => {
 // própria exportação como uma linha de auditoria (tipo_acao 'exportacao').
 router.get('/logs/exportar/:formato', autorizarSuperAdmin(...GESTAO), async (req, res) => {
     const { formato } = req.params;
-    if (!['excel', 'pdf'].includes(formato)) {
-        return res.status(400).json({ erro: 'formato deve ser "excel" ou "pdf"' });
+    if (formato !== 'pdf') {
+        return res.status(400).json({ erro: 'formato deve ser "pdf"' });
     }
 
     const client = await comConexaoSuperAdmin();
@@ -1016,13 +1061,6 @@ router.get('/logs/exportar/:formato', autorizarSuperAdmin(...GESTAO), async (req
             descricao: req.superAdmin.nome + ' exportou os logs de auditoria em ' + formato.toUpperCase() + ' (' + resultado.rows.length + ' linhas)',
             req,
         });
-
-        if (formato === 'excel') {
-            const buffer = await gerarExcelLogs(resultado.rows);
-            res.set('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-            res.set('Content-Disposition', 'attachment; filename="logs-auditoria.xlsx"');
-            return res.send(Buffer.from(buffer));
-        }
 
         const buffer = await gerarPdfLogs(resultado.rows);
         res.set('Content-Type', 'application/pdf');
@@ -1239,6 +1277,49 @@ router.put('/configuracoes-plataforma', autorizarSuperAdmin('super_admin'), asyn
     } catch (err) {
         console.error(err);
         res.status(500).json({ erro: 'Erro ao salvar configuração da plataforma' });
+    } finally {
+        client.release();
+    }
+});
+
+// POST /superadmin/comunicados-plataforma — envia um comunicado pra todas as
+// associações ativas de uma vez (uma linha em `comunicados` por associação,
+// reaproveitando a tabela e o mural que já existe em cada tenant -- nenhuma
+// tela nova precisou ser criada em painel/index.html ou portal.html pra
+// exibir). `autor_id` fica null (super-admin não é um usuario de tenant);
+// `origem_plataforma = true` marca a origem, pra front mostrar "Comunicado
+// oficial" e bloquear editar/excluir por conta da diretoria (ver
+// routes/comunicados.js PUT/DELETE).
+router.post('/comunicados-plataforma', autorizarSuperAdmin(...GESTAO), async (req, res) => {
+    const { titulo, conteudo } = req.body;
+    if (!titulo || !conteudo) {
+        return res.status(400).json({ erro: 'titulo e conteudo são obrigatórios' });
+    }
+
+    const client = await comConexaoSuperAdmin();
+    try {
+        const associacoes = await client.query(`SELECT id FROM associacoes WHERE ativo = true`);
+
+        for (const associacao of associacoes.rows) {
+            await client.query(
+                `INSERT INTO comunicados (associacao_id, autor_id, titulo, conteudo, origem_plataforma)
+                 VALUES ($1, NULL, $2, $3, true)`,
+                [associacao.id, titulo, conteudo]
+            );
+        }
+
+        await registrarLogAuditoria(client, {
+            superAdminId: req.superAdmin.id, superAdminNome: req.superAdmin.nome, superAdminEmail: req.superAdmin.email,
+            modulo: 'comunicados', tipoAcao: 'criacao',
+            descricao: req.superAdmin.nome + ' enviou um comunicado da plataforma pra ' + associacoes.rows.length + ' associação(ões): "' + titulo + '"',
+            dadosNovos: { titulo, conteudo, total_associacoes: associacoes.rows.length },
+            req,
+        });
+
+        res.status(201).json({ ok: true, total_associacoes: associacoes.rows.length });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ erro: 'Erro ao enviar comunicado da plataforma' });
     } finally {
         client.release();
     }

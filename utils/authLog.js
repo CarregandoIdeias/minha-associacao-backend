@@ -5,9 +5,13 @@
 // outras tabelas.
 
 async function registrarEventoAuth(client, { usuarioId, associacaoId, emailTentado, evento, req }) {
-    const ip = req
-        ? (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket?.remoteAddress || null
-        : null;
+    // req.ip (não o header X-Forwarded-For manualmente) -- Express já resolve
+    // o IP de verdade do cliente respeitando app.set('trust proxy', 1)
+    // (server.js), que confia só no hop mais próximo do Render. Pegar o
+    // header direto permitiria o próprio cliente forjar o IP registrado
+    // (X-Forwarded-For é livre pra escrever, e proxies normalmente
+    // *acrescentam* o IP real ao invés de sobrescrever).
+    const ip = req ? (req.ip || req.socket?.remoteAddress || null) : null;
     const userAgent = req ? (req.headers['user-agent'] || null) : null;
 
     try {

@@ -4,7 +4,10 @@ const express = require('express');
 const { autenticar, bloquearSenhaProvisoria, bloquearTrialExpirado, autorizar, comConexaoTenant } = require('../middleware/auth');
 const { imagemBase64Valida, comprovanteBase64Valido } = require('../utils/validacao');
 
+const paramUuid = require('../middleware/paramUuid');
 const router = express.Router();
+// Rejeita :id que nao seja uuid com 400, em vez de deixar virar 500 no Postgres
+router.param('id', paramUuid);
 router.use(autenticar);
 router.use(bloquearSenhaProvisoria);
 router.use(bloquearTrialExpirado);
@@ -15,7 +18,9 @@ router.get('/meus-dados', async (req, res) => {
     const client = await comConexaoTenant(req.usuario.associacao_id);
     try {
         const resultado = await client.query(
-            `SELECT id, nome_completo, cpf, telefone, categoria, status, data_ingresso, foto_base64
+            `SELECT id, nome_completo, cpf, rg, telefone, categoria, status, data_ingresso, criado_em, foto_base64,
+                    endereco_cep, endereco_logradouro, endereco_numero, endereco_complemento,
+                    endereco_bairro, endereco_cidade, endereco_estado
              FROM associados
              WHERE usuario_id = $1`,
             [req.usuario.id]
@@ -23,7 +28,26 @@ router.get('/meus-dados', async (req, res) => {
         if (resultado.rows.length === 0) {
             return res.status(404).json({ erro: 'Nenhum cadastro de associado vinculado a esse login' });
         }
-        res.json(resultado.rows[0]);
+
+        // Mesma flag de boas-vindas usada no painel da associação (ver
+        // GET /plano, backend/routes/plano.js) -- é por usuário, não por
+        // papel, então o mesmo PATCH /auth/boas-vindas-visto serve pros dois.
+        const usuarioRow = await client.query(
+            `SELECT boas_vindas_visto_em FROM usuarios WHERE id = $1`,
+            [req.usuario.id]
+        );
+        const boasVindasPendente = usuarioRow.rows.length > 0 && usuarioRow.rows[0].boas_vindas_visto_em === null;
+
+        const associacaoRow = await client.query(
+            `SELECT nome FROM associacoes WHERE id = $1`,
+            [req.usuario.associacao_id]
+        );
+
+        res.json({
+            ...resultado.rows[0],
+            boas_vindas_pendente: boasVindasPendente,
+            nome_associacao: associacaoRow.rows[0] ? associacaoRow.rows[0].nome : '',
+        });
     } catch (err) {
         console.error(err);
         res.status(500).json({ erro: 'Erro ao buscar seus dados' });

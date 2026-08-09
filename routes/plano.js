@@ -9,13 +9,16 @@ const express = require('express');
 const { autenticar, bloquearSenhaProvisoria, autorizar, comConexaoTenant } = require('../middleware/auth');
 const { registrarLogAuditoria } = require('../utils/auditoria');
 const { comprovanteBase64Valido } = require('../utils/validacao');
-const { calcularValorMensalidade, statusAssinatura } = require('../utils/precos');
+const {
+    calcularValorMensalidade, statusAssinatura, alertaAssinatura, LIMITE_ASSOCIADOS_PLANO,
+    PROXIMO_PLANO, alertaLimiteAssociados, planosGerenciaveis, planoMinimoParaComportar,
+} = require('../utils/precos');
 
 const router = express.Router();
 router.use(autenticar);
 router.use(bloquearSenhaProvisoria);
 
-const PLANOS_CONTRATAVEIS = ['basico', 'profissional', 'enterprise'];
+const PLANOS_CONTRATAVEIS = ['basico', 'intermediario', 'avancado'];
 
 // GET /plano — dados de plano/trial da associação logada, pra montar o card
 // do Dashboard (trial em andamento, plano pago ativo, ou trial expirado) e a
@@ -25,8 +28,8 @@ router.get('/', autorizar('admin', 'diretoria'), async (req, res) => {
     const client = await comConexaoTenant(req.usuario.associacao_id);
     try {
         const associacao = await client.query(
-            `SELECT plano, ativo, trial_dias, trial_expira_em, vencimento_assinatura,
-                    valor_mensalidade_manual, dias_alerta_vencimento
+            `SELECT nome, plano, ativo, trial_dias, trial_expira_em, vencimento_assinatura,
+                    valor_mensalidade_manual, dias_alerta_vencimento, dias_alerta_assinatura
              FROM associacoes WHERE id = $1`,
             [req.usuario.associacao_id]
         );
@@ -34,6 +37,16 @@ router.get('/', autorizar('admin', 'diretoria'), async (req, res) => {
             return res.status(404).json({ erro: 'Associação não encontrada' });
         }
         const a = associacao.rows[0];
+
+        // Flag de "já viu o modal de boas-vindas" -- vive em usuarios (é por
+        // usuário, não por associação), buscada aqui pra reaproveitar a
+        // mesma chamada que já roda logo após o login (ver entrarNoDashboard,
+        // painel/index.html) em vez de criar uma rota só pra isso.
+        const usuarioRow = await client.query(
+            `SELECT boas_vindas_visto_em FROM usuarios WHERE id = $1`,
+            [req.usuario.id]
+        );
+        const boasVindasPendente = usuarioRow.rows.length > 0 && usuarioRow.rows[0].boas_vindas_visto_em === null;
 
         const totalAssociados = await client.query(
             `SELECT COUNT(*) AS total FROM associados WHERE associacao_id = $1`,
@@ -53,14 +66,45 @@ router.get('/', autorizar('admin', 'diretoria'), async (req, res) => {
             [req.usuario.associacao_id]
         );
 
+        // Controle de limite de associados (item 2, 30/07/2026) -- desde
+        // essa data o cadastro É bloqueado ao atingir 100% (ver POST
+        // /associados, routes/associados.js), decisão de produto confirmada
+        // com o usuário (reverte o "só avisa" documentado antes disso).
+        // "Perto do limite" (perto_do_limite, >=90%) é mantido por
+        // compatibilidade com quem já consumia esse campo; alerta_limite
+        // abaixo é a versão nova, com as 3 faixas (80/90/100%).
+        const limiteAssociados = LIMITE_ASSOCIADOS_PLANO[a.plano] != null ? LIMITE_ASSOCIADOS_PLANO[a.plano] : null;
+        const pertoDoLimite = limiteAssociados != null && total >= limiteAssociados * 0.9;
+        const alertaLimite = alertaLimiteAssociados(a.plano, total);
+
+        // Renovação inteligente (item 6): só preenchido quando o total atual
+        // já não cabe mais no plano contratado -- normalmente não deveria
+        // acontecer com o bloqueio de cadastro ativo, mas cobre o caso de o
+        // Super Admin ter reduzido o plano manualmente com a associação já
+        // maior que o novo teto.
+        let planoRenovacaoSugerido = null;
+        if (limiteAssociados != null && total > limiteAssociados) {
+            const sugestao = planoMinimoParaComportar(total);
+            if (sugestao !== a.plano) planoRenovacaoSugerido = sugestao;
+        }
+
         res.json({
+            nome_associacao: a.nome,
+            boas_vindas_pendente: boasVindasPendente,
             plano: a.plano,
             trial_dias: a.trial_dias,
             trial_expira_em: a.trial_expira_em,
             vencimento_assinatura: a.vencimento_assinatura,
             valor_mensalidade: calcularValorMensalidade(a.plano, total, a.valor_mensalidade_manual),
             total_associados: total,
+            limite_associados: limiteAssociados,
+            perto_do_limite: pertoDoLimite,
+            alerta_limite: alertaLimite,
+            proximo_plano: PROXIMO_PLANO[a.plano] || null,
+            planos_gerenciaveis: planosGerenciaveis(a.plano),
+            plano_renovacao_sugerido: planoRenovacaoSugerido,
             status: statusAssinatura(a),
+            alerta: alertaAssinatura(a),
             pix_plataforma: pixPlataforma.rows[0] || { chave_pix: null, nome_recebedor_pix: null, cidade_pix: null },
             solicitacao_pendente: solicitacaoPendente.rows[0] || null,
         });
@@ -79,7 +123,7 @@ router.post('/solicitar-contratacao', autorizar('admin'), async (req, res) => {
     const { plano_solicitado, comprovante_base64 } = req.body;
 
     if (!plano_solicitado || !PLANOS_CONTRATAVEIS.includes(plano_solicitado)) {
-        return res.status(400).json({ erro: 'plano_solicitado deve ser "basico", "profissional" ou "enterprise"' });
+        return res.status(400).json({ erro: 'plano_solicitado deve ser "basico", "intermediario" ou "avancado"' });
     }
     if (!comprovante_base64) {
         return res.status(400).json({ erro: 'comprovante_base64 é obrigatório' });
@@ -124,6 +168,15 @@ router.post('/solicitar-contratacao', autorizar('admin'), async (req, res) => {
 
         res.status(201).json(resultado.rows[0]);
     } catch (err) {
+        // 23505 = unique_violation -- índice único parcial
+        // solicitacoes_plano_pendente_unica (migration 20260729020000) é a
+        // garantia de verdade contra a race condition de duas requisições
+        // simultâneas passarem os dois pelo SELECT acima antes de qualquer
+        // uma inserir; o SELECT continua existindo só como saída rápida no
+        // caso comum (evita a viagem extra ao banco na maioria das vezes).
+        if (err.code === '23505') {
+            return res.status(409).json({ erro: 'Já existe uma solicitação de contratação aguardando aprovação' });
+        }
         console.error(err);
         res.status(500).json({ erro: 'Erro ao enviar solicitação de contratação' });
     } finally {

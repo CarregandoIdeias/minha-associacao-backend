@@ -4,12 +4,660 @@ Contexto rápido para sessões de IA trabalhando neste repositório. Para o
 quadro completo (rotas, modelo de dados, roadmap), ver `README.md`. Para
 tudo sobre migrações e RLS, ver `supabase/README.md`.
 
+## CAUSA RAIZ da instabilidade intermitente: RLS castando GUC vazio (07/08/2026)
+
+**Isto resolve o mistério aberto desde 26/07** (ver seção "Instabilidade
+intermitente do pooler" mais abaixo, que ficava em "causa exata ainda não
+confirmada" e culpava uma suposta resposta de query vazando entre
+conexões). **Não era isso.**
+
+Descoberto durante a bateria de QA do mesmo dia: o teste abortava sempre
+no mesmo `INSERT INTO associacoes` — uma query **sem nenhum parâmetro
+uuid** — com `22P02 invalid input syntax for type uuid: ""`. Reproduzido
+de forma limpa:
+
+| Passo | `current_setting('app.current_associacao_id', true)` |
+|---|---|
+| conexão nova | `NULL` |
+| depois de `set_config(...)` com um uuid | o uuid |
+| **depois de `RESET ALL` / `DISCARD ALL`** | **`''` (string vazia), não `NULL`** |
+
+No Postgres, um GUC customizado que já foi setado na sessão e depois
+resetado **não volta a ser inexistente** — passa a devolver string vazia.
+E `RESET ALL`/`DISCARD ALL` é exatamente o que o PgBouncer roda ao
+devolver uma conexão física pro pool. Como as 13 policies faziam
+`current_setting(...)::uuid`, qualquer conexão reciclada que já tivesse
+sido usada por alguém que setou o tenant passava a **estourar toda query
+naquela tabela**.
+
+Isso explica cada peculiaridade que estava sem resposta: era intermitente
+(depende de pegar conexão reciclada ou nova); piorava "a frio" (mais
+reciclagem); os retries mitigavam (a nova tentativa pega outra conexão
+física); aparecia em query sem uuid nenhum (o cast está na **policy**, não
+na query); e atingia até rota de super-admin, que nem seta esse GUC.
+
+Corrigido pela migration `20260807000000_rls_nullif_guc_vazio.sql`:
+`NULLIF(current_setting(...), '')::uuid` nas 13 policies. Usa `ALTER
+POLICY` (não DROP+CREATE) de propósito — não existe janela em que a tabela
+fica sem policy, então roda com a aplicação no ar. **Sem mudança de
+semântica de segurança**: onde antes dava erro, agora não casa nenhuma
+linha; o erro nunca liberou acesso.
+
+**Cuidado ao mexer nisso**: `set_config('app.x', NULL, false)` **não**
+serve pra "limpar" — equivale a um RESET, que é justamente o que gera a
+string vazia. Se precisar neutralizar o GUC numa conexão, use um uuid
+sentinela (`'00000000-0000-0000-0000-000000000000'`), que casta sem erro e
+não casa nenhuma linha. Qualquer policy nova que leia um GUC e faça cast
+tem que usar `NULLIF(..., '')` — a query de conferência está no rodapé da
+migration.
+
+## RLS estava desligado na prática: flag de bypass vazando entre requisições (07/08/2026)
+
+**O achado mais grave da rodada de QA**, encontrado por acidente ao validar
+a migration do `NULLIF`: um teste de isolamento falhou e a primeira suspeita
+foi ter enfraquecido as policies. Não era — o bug é **anterior**, e não tem
+relação com aquela migration.
+
+`comConexaoSuperAdmin()` setava `app.superadmin_bypass = 'true'` em nível de
+**sessão** (`is_local = false`), e `client.release()` devolve a conexão pro
+pool **sem limpar nada**. Como o pool reaproveita a mesma conexão física, a
+requisição de tenant seguinte herdava a flag — rodando com o **RLS
+efetivamente desligado**. Idem para `app.auth_bypass` (login/redefinição de
+senha).
+
+Confirmado na prática, com os helpers reais e `DB_POOL_MAX=1` (pior caso
+realista, pois sob carga a conexão é reusada o tempo todo):
+
+| Cenário | `app.superadmin_bypass` | Tenant A enxergava |
+|---|---|---|
+| depois de uma requisição de super-admin | `"true"` | **associados de A e de B** |
+| conexão limpa (controle) | `""` | só os de A |
+
+**Nunca virou vazamento de dado observável** porque toda query da aplicação
+também filtra `WHERE associacao_id = $1` na mão. Mas é exatamente essa a
+camada que deveria segurar quando esse filtro faltar — e o
+`README`/`CLAUDE.md` afirmavam que "o Postgres recusa fisicamente misturar
+dados entre associações", o que estava valendo **só por sorte**. Uma rota
+nova esquecendo o filtro (ou uma query que legitimamente não tem como
+filtrar, como as de `portal.js` que se apoiam em `usuario_id`) viraria
+brecha cross-tenant direta.
+
+Corrigido em `middleware/auth.js`: as três flags passam a ser declaradas
+**sempre**, por toda conexão, via `sqlSessao()` — quem é tenant zera os dois
+bypass, quem é bypass zera o tenant. Não existe mais estado herdado.
+
+Detalhe que **não** dá pra fazer: usar `set_config(x, NULL, false)` pra
+"limpar" — isso equivale a um RESET, e GUC customizado resetado devolve
+string vazia (é a causa raiz descrita na seção acima). Por isso o sentinela
+`TENANT_NENHUM` (`00000000-...`), que casta sem erro e não casa nenhuma
+linha, **com ou sem** a migration do `NULLIF` aplicada — os dois consertos
+ficam independentes de propósito, já que produção ainda não recebeu a
+migration.
+
+**Testado** (10/10, com `DB_POOL_MAX=1`): vazamento fechado nos três
+sentidos (super-admin→tenant, auth→tenant, tenant A→tenant B) e as duas
+regressões que importam (super-admin continua enxergando tudo; `auth_bypass`
+continua lendo `associacoes`, sem o que o login não funciona).
+
+## QA exploratório pré-cliente — 8 achados corrigidos (07/08/2026)
+
+Bateria de 71 asserções (segurança + funcionalidade) contra staging,
+pedida antes do primeiro cliente. Tokens assinados direto com o
+`JWT_SECRET` local pra não esbarrar no rate limit de login (10/15min) —
+`autenticar()` revalida tudo no banco de qualquer forma, então o teste
+continua realista.
+
+**Passou de primeira** (não mexido): isolamento entre associações 17/17
+(admin de A não alcança nenhum recurso de B, nenhuma listagem vaza),
+permissões por papel, token/sessão 10/10 (forjado, expirado, usuário
+desativado, associação bloqueada, token anterior à troca de senha),
+fluxo de cobrança (duplo-pagamento 409, editar paga 409, estorno
+removendo o pagamento), trial e gating por plano.
+
+**Corrigidos:**
+
+1. **`PUT /usuarios/:id` promovia qualquer um a `admin`** — `POST
+   /usuarios` rejeita o papel `admin` (whitelist sem ele), mas o `PUT`
+   aceitava: a regra era contornável em dois passos (criar como
+   `consulta`, promover depois). Decisão de produto confirmada com o
+   usuário: **só o Super Admin designa admin de associação**. Bloqueia só
+   a **promoção**, não o valor em si — a tela de edição manda `papel`
+   sempre junto com o nome, então recusar `'admin'` de forma cega
+   quebraria editar o nome de um admin que já existe; quando o alvo já é
+   admin, o valor é no-op e passa (403 `PROMOCAO_ADMIN_NEGADA` caso
+   contrário).
+
+2. **`POST /cobrancas` aceitava `associado_id` de outra associação** — o
+   INSERT passava, porque a FK só confere que a linha existe e o RLS só
+   olha o `associacao_id` da própria cobrança. Criava uma linha órfã que
+   **nenhum dos dois tenants enxergava** (some do JOIN com `associados`
+   dos dois lados). De quebra, o 201-vs-erro virava um oráculo fraco:
+   respondia se um uuid qualquer é associado em alguma associação da
+   plataforma. Agora confere `WHERE id = $1 AND associacao_id = $2` antes
+   do INSERT (404 nos dois casos, oráculo fechado).
+
+3. **`vencimento` inválido virava 500** — data não parseável ia direto pro
+   INSERT. Novo `dataValida()` (rejeita "Invalid Date" e ano fora de
+   1900-2200), aplicado no `POST` e no `PUT` de cobranças.
+
+4. **`valor` sem teto** — a coluna é `numeric` **sem precisão**, então o
+   banco aceitava `1e20` alegremente (o QA criou uma cobrança nesse
+   valor). Não é falha de segurança, mas num campo de dinheiro um zero a
+   mais digitado sem querer vira cobrança absurda pro associado. Novo
+   `valorMonetarioValido()` (finito, ≥ 0, teto de R$ 1.000.000, no máximo
+   2 casas decimais — a folga de `1e-9` absorve imprecisão de float).
+
+5. **JSON malformado virava 500** — o `express.json()` lança `SyntaxError`,
+   que caía no handler global. Agora 400. Corpo acima do limite virou 413
+   (era 500 também).
+
+6. **Toda rota `/:id` virava 500 com id não-uuid** — o valor ia direto pro
+   Postgres (`22P02`) e saía como "Erro interno do servidor". Resolvido de
+   forma central com `middleware/paramUuid.js` + `router.param('id',
+   paramUuid)` nos 7 routers que usam `:id` (confirmado antes no
+   `information_schema` que **todas** as colunas `id` dessas tabelas são
+   uuid, então não existe rota legítima que receba outra coisa).
+   **Ordem importa e foi testada**: o `router.param` roda depois dos
+   `router.use(autenticar)`, então requisição sem token com id inválido
+   continua devolvendo 401, não 400 — não vira oráculo.
+
+Achados 2 e 3 também fecharam o oráculo do achado que estava listado
+separado (201 vs 500 revelando existência cross-tenant).
+
+**Por que tantos "500 que deviam ser 4xx" importam com cliente real**: não
+são falha de segurança, mas fazem a aplicação parecer quebrada para quem
+só digitou algo errado, e afogam no log o 500 de verdade quando ele
+acontecer.
+
+## Auditoria de segurança pré-cliente — XSS por quebra de atributo + 3 itens baixos (07/08/2026)
+
+Pedida pelo usuário ao fechar o **primeiro cliente real** ("não posso
+sofrer com isso depois que tiver cliente ativo"). Revisão do código de
+verdade, não releitura das auditorias anteriores. `npm audit` limpo
+(0 vulnerabilidades), zero SQL injection (todas as queries dinâmicas usam
+`$N`; `ORDER BY` é ternário com literal), isolamento por tenant
+consistente (`WHERE id = $1 AND associacao_id = $2` + RLS). As duas
+pendências de XSS de 29/07 (`/atividades`, `cidade`/`estado`) já estavam
+corrigidas.
+
+**Achado principal — XSS armazenado com escalação de privilégio, real e
+confirmado executando código.** O `escapeHtml` do painel usava
+`textContent -> innerHTML`, que escapa `<`, `>` e `&` mas **deixa aspas
+passarem intactas**. Seguro em contexto de texto (a maioria dos usos), mas
+não dentro de atributo — e `observacao` do associado ia pra `title="..."`
+em `index.html`. Cadeia completa: `observacao` **sem validação nenhuma**
+aqui no backend, coluna `text` sem teto, gravável por
+`admin`/`diretoria`/**`atendimento`**/**`operador`**, renderizada pra
+todos os papéis (inclusive `admin`), com o JWT no `localStorage`. Um
+`atendimento`/`operador` — que por desenho não pode tocar em Usuários nem
+Configurações — gravava `x" onmouseover="..."`, o admin abria a lista de
+Associados e o script rodava na sessão dele. **Derrotava exatamente os
+perfis granulares de 28/07.** Corrigido em duas camadas (mesmo princípio
+do XSS de 27/07): `escapeHtml` passou a escapar aspas (ver
+`painel/CLAUDE.md` — conserta todos os contextos de atributo de uma vez,
+inclusive os que só estavam seguros por sorte) e `textoLivreValido()` novo
+em `utils/validacao.js`, aplicado a `observacao` no `POST`/`PUT
+/associados` (teto de 2000 caracteres, barra caracteres de controle,
+**permite aspas de propósito** — são legítimas em texto livre, a defesa
+contra XSS é o escape na renderização).
+
+**Confirmado em navegador de verdade antes e depois**, com o flag resetado
+a cada caso: no código antigo o `<span>` saía com
+`title+onmouseover+a+style` e o handler **executava**; no novo sai só
+`title+style` e o payload vira texto literal do `title`.
+
+**Os 3 de severidade baixa, também corrigidos na mesma rodada:**
+
+1. **`associacao_id` vinha do token sem revalidação** (`middleware/auth.js`,
+   `autenticar()`). `papel`/`nome`/`plano`/`trial_expira_em` já vinham
+   frescos do banco desde 25-29/07, mas `associacao_id` não — e é
+   justamente a chave do isolamento entre tenants (vira o `SET` de RLS em
+   `comConexaoTenant` e o `WHERE associacao_id` de toda query). Não era
+   explorável (o token é assinado, ninguém forja o valor), mas era o
+   único campo onde ficar desatualizado significaria uma associação
+   enxergando dado de outra. Agora `u.associacao_id` entra no `SELECT` da
+   revalidação e sobrescreve o do payload. **Testado de forma direta**:
+   usuário logado em A, `UPDATE usuarios SET associacao_id = B` no banco
+   sem reemitir token, e o **mesmo token** passou a enxergar os dados de B
+   (antes continuaria em A).
+
+2. **Enumeração de usuário no login** (`routes/auth.js`). A checagem de
+   `associacao_ativa` vinha **antes** do `bcrypt.compare`, então a
+   mensagem específica de "associação bloqueada" (403, diferente do 401
+   genérico) respondia a quem tivesse só o e-mail, confirmando de graça
+   que ele existe. Movida pra **depois** da senha conferida: quem acertou
+   a senha é o dono da conta e recebe a mensagem útil; quem não acertou
+   recebe o mesmo 401 de sempre. Junto disso, `HASH_INEXISTENTE`
+   (calculado uma vez na subida) faz um `bcrypt.compare` descartável
+   quando o e-mail não existe — sem isso o compare era pulado e a resposta
+   voltava bem mais rápido, e essa diferença de tempo sozinha já denunciava
+   quais e-mails existem.
+
+3. **`LIMIT` com valor inválido virava 500.** `Math.min(parseInt(x, 10), N)`
+   devolve `NaN` pra texto e passa negativo adiante, chegando a `LIMIT
+   NaN`/`LIMIT -5` no SQL. Nunca foi injeção (o `parseInt` come qualquer
+   coisa depois do número, e a maioria dos pontos já era parametrizada),
+   mas era erro exposto sem necessidade — e o `|| padrao` que alguns
+   pontos tinham cobria `NaN` e zero, **não o negativo**. Novo
+   `inteiroPositivo(valor, padrao, maximo)` em `utils/validacao.js`,
+   aplicado nos 7 pontos que alimentam `LIMIT` (`associados`, `auditoria`,
+   `cobrancas` e 4 em `superadmin`).
+
+**Testado contra staging** com associações/usuários de teste criados e
+apagados via `comConexaoSuperAdmin()` (13 casos unitários da validação de
+texto + 10 do `inteiroPositivo` + 8 E2E da `observacao` + 10 E2E dos 3
+itens). Verificado depois no ambiente de staging já publicado (Vercel com
+o `escapeHtml` novo, Render rejeitando observação de 2001 caracteres).
+
+**Fica registrado pra não repetir:** `escapeHtml` **não** é seguro em
+atributo se alguém reverter pra `textContent -> innerHTML`. Os usos em
+`class="badge ..."` dependem hoje de `status` ser enum no banco + whitelist
+na rota — se um dia um campo livre for pra um atributo, vira XSS
+silenciosamente de novo.
+
 ## O que é
 
 API multi-tenant (Node/Express + Postgres/Supabase) para gestão de
 associações — Super Admin cadastra associações-clientes, cada uma com seu
 admin/diretoria/associados isolados das outras. Front-end em
 `../painel` (HTML/JS puro, repositório separado), consome essa API.
+
+## Controle inteligente de limite de associados + sugestão de upgrade (30/07/2026)
+
+Pedido grande do usuário (9 itens numerados) que **reverte uma decisão de
+produto já documentada**: até aqui, `LIMITE_ASSOCIADOS_PLANO` era só
+informativo, `POST /associados` nunca bloqueava (comentário antigo dizia
+isso explicitamente). Antes de implementar, 3 pontos de conflito com a
+spec original foram confirmados com o usuário (não assumidos):
+
+1. **Bloqueio de cadastro: confirmado que sim, bloqueia de verdade agora.**
+2. **Ativação de upgrade continua manual** (Pix + comprovante + aprovação
+   do Super Admin, fluxo já existente) — a spec pedia "atualizar
+   imediatamente os limites ao confirmar o upgrade", mas isso já é
+   exatamente o que `PATCH /superadmin/solicitacoes-plano/:id/aprovar`
+   faz desde 26/07 (atualiza `plano`+`vencimento_assinatura` e já grava
+   log de auditoria) — não precisou de nada novo, só o front reaproveitar
+   esse fluxo com contexto (pré-seleção de plano).
+3. **"Renovação" não é um processo novo** — reaproveita a mesma
+   contratação de sempre, só pré-selecionando o plano (atual ou sugerido).
+
+**`utils/precos.js`** ganhou 4 funções novas:
+- `alertaLimiteAssociados(plano, total)` — 3 faixas (80%/90%/100%),
+  espelha `alertaAssinatura()` já existente (mesmo formato
+  `{nivel, ...}`), mas para uso de capacidade em vez de vencimento.
+  `null` quando plano sem teto (trial/avançado) ou uso < 80%.
+- `planosGerenciaveis(planoAtual)` — quais planos aparecem no modal
+  "Gerenciar Plano": trial/básico mostram os 3, intermediário só mostra
+  avançado, avançado não mostra nenhum (front usa isso pra saber quando
+  esconder a grade de escolha e ir direto pro pagamento). **Nunca inclui
+  downgrade** — regra de negócio explícita: downgrade só pelo Super Admin,
+  manual, depois de validar que a quantidade de associados cabe no plano
+  menor (não implementado — não foi pedido nessa rodada).
+- `planoMinimoParaComportar(totalAssociados)` — menor plano pago cujo
+  teto comporta esse total (usado na renovação inteligente).
+- `PROXIMO_PLANO` (objeto/mapa) — sugestão de upgrade de 1 nível
+  (básico→intermediário→avançado), usado na mensagem "recomendamos migrar
+  para o Plano X".
+
+**`GET /plano`** (`routes/plano.js`) ganhou `alerta_limite`,
+`proximo_plano`, `planos_gerenciaveis` e `plano_renovacao_sugerido` (só
+preenchido quando `total_associados` já não cabe mais no plano atual —
+normalmente não deveria acontecer com o bloqueio ativo, mas cobre o caso
+do Super Admin reduzir o plano manualmente com a associação já maior que
+o novo teto). Campos antigos (`limite_associados`, `perto_do_limite`)
+mantidos como estavam, por compatibilidade.
+
+**`POST /associados`** (`routes/associados.js`) ganhou a checagem de
+limite antes de gerar a senha provisória (falha rápido) — 403 com
+`codigo: 'LIMITE_ASSOCIADOS_ATINGIDO'` quando `total >= limite` do plano
+atual. `PUT /associados/:id` (edição) não foi tocado, só criação conta
+pro limite.
+
+**Testado em staging**: associação de teste no plano Básico (limite 50),
+populada com associados fake via `pool.connect()` direto até 40 (80%,
+confirmado nível `atencao`), 45 (90%, `alerta`, "restam 5 vagas"), 50
+(100%, `critico`, e `POST /associados` de fato devolveu 403), depois
+trocado pra Avançado (sem teto, `POST` liberado, 201 confirmado) e de
+volta pra Básico com 51 associados (`plano_renovacao_sugerido:
+'intermediario'` confirmado). Dados de teste removidos ao final.
+
+## Modal de boas-vindas no primeiro acesso (admin e associado, 30/07/2026)
+
+Pedido do usuário depois de ver o painel funcionando: mostrar um modal só
+na primeira vez que cada usuário loga (admin/diretoria no painel da
+associação, associado no portal), com botão "Começar a usar a
+plataforma" que fecha e nunca mais reaparece — persistido no banco, não
+em `localStorage` (senão reapareceria ao trocar de navegador/limpar
+cache, problema já visto em outros fluxos do projeto).
+
+Nova coluna `usuarios.boas_vindas_visto_em timestamptz` (migration
+`20260730000000_boas_vindas_usuario.sql`, aditiva, nullable — `NULL` =
+"ainda não viu"). **É por usuário, não por papel** — a mesma coluna e o
+mesmo endpoint servem tanto pro admin quanto pro associado, sem
+duplicação:
+
+- `PATCH /auth/boas-vindas-visto` (novo, `routes/auth.js`, qualquer
+  papel autenticado) — `UPDATE usuarios SET boas_vindas_visto_em = now()
+  WHERE id = req.usuario.id AND boas_vindas_visto_em IS NULL`. Chamado
+  no clique do botão, front já esconde o modal na hora sem esperar a
+  resposta (fire-and-forget, mesmo padrão de `marcarComunicadosVisiveisComoLidos`
+  do portal).
+- `GET /plano` (`routes/plano.js`, admin/diretoria) ganhou
+  `boas_vindas_pendente` e `nome_associacao` — reaproveita a mesma
+  chamada que `entrarNoDashboard()` já faz logo após login/restaurar
+  sessão (`painel/index.html`), sem rota nova só pra isso.
+- `GET /portal/meus-dados` (`routes/portal.js`, associado) ganhou os
+  mesmos dois campos, pelo mesmo motivo — é a primeira chamada que
+  `carregarInicio()` faz em `portal.html`.
+
+Testado em staging: usuário admin e usuário associado de teste criados
+via `pool.connect()` direto (mesmo padrão de sempre), `curl` confirmando
+`boas_vindas_pendente: true` no primeiro `GET`, `false` depois do
+`PATCH`, permanentemente. Durante o teste do fluxo do associado a
+instabilidade intermitente do pooler (ver seção própria abaixo) voltou a
+aparecer, dessa vez persistente por alguns minutos e afetando login de
+qualquer usuário (inclusive um já apagado) — confirmado como falha de
+infraestrutura pré-existente, não relacionada a este código; a correção
+foi validada por outras vias (sintaxe, queries diretas no banco,
+round-trip HTTP completo obtido antes da instabilidade começar). Dados
+de teste removidos ao final.
+
+## Auditoria de segurança pré-lançamento — itens de severidade baixa corrigidos (29/07/2026, continuação)
+
+Depois dos 5 médios (seção seguinte), o usuário pediu pra resolver também
+os de severidade baixa da mesma auditoria:
+
+**Exportação Excel removida, só PDF continua** — o maior dos itens.
+`npm audit` reportava 10 vulnerabilidades (9 high, 1 moderate) na cadeia
+transitiva do `exceljs` (via `archiver`: glob/minimatch/brace-expansion/
+rimraf/uuid/zip-stream). Testado trocar de versão antes de decidir remover
+— **nenhuma versão do exceljs escapa disso**: `^4.4.0` (o que já estava
+instalado) mostrava `exceljs >=3.5.0` vulnerável com fix sugerido 3.4.0;
+instalando 3.4.0, o próprio `npm audit` reavaliava e reportava 3.4.0
+também vulnerável (`range: 0.1.10 - 4.1.1`) com fix sugerido 3.10.0;
+instalando 3.10.0, voltava a reportar `exceljs` vulnerável com `range:
+>=0.1.10` (ou seja, **toda versão já publicada**) e fix sugerido 3.4.0 de
+novo — um loop sem saída real, porque a vulnerabilidade está no
+`archiver` que o exceljs usa pra montar o `.xlsx` como zip, não no
+exceljs em si. A pedido do usuário ("se for caso remova exportações em
+excel, deixa apenas pdf"), `exceljs` foi removido do `package.json`
+(`npm uninstall exceljs` — **`npm audit` foi de 10 pra 0 vulnerabilidades**
+na hora). `pdfkit` (única lib de exportação que sobrou) não tem essa
+cadeia de dependências.
+
+Mudança em cascata, sempre removendo o branch `formato === 'excel'` e
+simplificando a assinatura da função (não fazia sentido manter um
+parâmetro `formato` que só um valor possível continua existindo):
+- `utils/exportarLogs.js`: `gerarExcelLogs` removida, só `gerarPdfLogs`
+  exportada.
+- `utils/exportarLeiturasComunicado.js`: `gerarExcelLeituras` removida,
+  só `gerarPdfLeituras` exportada.
+- `utils/validacao.js`: `sanitizarCelulaExcel()` (criada horas antes,
+  pro item de formula injection) virou órfã e foi removida também --
+  só existia pra sanitizar célula de Excel, não faz sentido mais.
+- `routes/auditoria.js`, `routes/superadmin.js` (`/logs/exportar/:formato`),
+  `routes/comunicados.js` (`/leituras/exportar/:formato`): validação de
+  `formato` mudou de `['excel','pdf'].includes(...)` pra
+  `formato !== 'pdf'`, removido o branch condicional que chamava a
+  função de Excel.
+- Front-end (`painel/CLAUDE.md` tem o detalhe): removidos os 3 botões
+  "Exportar Excel" (`superadmin.html`, `index.html` × 2 — auditoria e
+  leituras de comunicado) e simplificadas as 3 funções JS correspondentes
+  pra não receberem mais parâmetro de formato.
+
+Testado em staging: as 3 rotas (`/superadmin/logs/exportar/pdf`,
+`/auditoria/exportar/pdf`, `/comunicados/:id/leituras/exportar/pdf`)
+geram PDF válido (`file` confirmou `PDF document`); as 3 mesmas rotas
+com `/excel` no lugar de `/pdf` devolvem 400 `formato deve ser "pdf"`
+corretamente.
+
+**Outros 4 itens de severidade baixa, também corrigidos:**
+- IP forjável já estava coberto pelo fix de `req.ip` da seção anterior
+  (mesma correção serviu pros dois).
+- Limite de tamanho (~2MB) aplicado em `logo_base64` nas duas rotas de
+  associação do Super Admin (`POST`/`PUT /superadmin/associacoes`) --
+  mesmo padrão que `PUT /configuracoes/logo` já tinha, só essas duas
+  rotas tinham ficado de fora.
+- Log de auditoria não grava mais `logo_url` (base64 inteira, pode ter
+  MBs) em `dados_novos` a cada edição de associação --
+  `PUT /superadmin/associacoes/:id` agora exclui esse campo do objeto
+  antes de chamar `registrarLogAuditoria` (`const { logo_url,
+  ...dadosNovosSemLogo }`). A rota de criação já fazia isso certo desde
+  sempre (usava um objeto curado, não o `RETURNING` completo).
+- `nome` de usuário e o IP forjável eram os mesmos dos médios, não
+  duplicados aqui.
+
+## Auditoria de segurança pré-lançamento — 5 achados médios corrigidos (29/07/2026)
+
+Pedido pelo usuário antes de disponibilizar a plataforma pra clientes reais:
+auditoria completa via 2 agentes em paralelo (backend + front-end), cobrindo
+as 3 integrações (Super Admin/Painel da Associação/Portal do Associado).
+Achados de severidade média, todos corrigidos e testados em staging:
+
+1. **IP forjável nos logs de auditoria/autenticação** — `utils/authLog.js`
+   e `utils/auditoria.js` extraíam o IP manualmente de
+   `req.headers['x-forwarded-for'].split(',')[0]`, exatamente a posição que
+   o próprio cliente controla livremente (proxies normalmente *acrescentam*
+   o IP real ao invés de sobrescrever, então um atacante mandando
+   `X-Forwarded-For: 1.2.3.4` fazia esse valor forjado virar o IP
+   registrado). Trocado por `req.ip`, que já respeita `app.set('trust
+   proxy', 1)` (`server.js`) — mesmo mecanismo que o `express-rate-limit`
+   já usa corretamente.
+
+2. **Formula injection no Excel exportado** — `utils/exportarLogs.js` e
+   `utils/exportarLeiturasComunicado.js` gravavam célula de texto livre
+   (nome, descrição, e-mail) sem neutralizar valores que começam com
+   `=`/`+`/`-`/`@`/tab — um `nome` ou `descricao` assim vira fórmula ativa
+   quando o Excel é aberto. Novo `sanitizarCelulaExcel()` em
+   `utils/validacao.js` prefixa com aspas simples (`'`) qualquer valor
+   nessas condições antes de `planilha.addRow(...)` — testado
+   isoladamente com `=HYPERLINK(...)`, `+1+1`, `-cmd|calc`, `@SUM(...)`.
+
+3. **`nome` de usuário sem validação** — `POST`/`PUT /usuarios`
+   (`routes/usuarios.js`) só exigiam "não vazio". Novo `nomeValido()` em
+   `utils/validacao.js` (máx. 120 caracteres, bloqueia caracteres de
+   controle) aplicado nos dois. Defesa em profundidade complementar ao
+   item 2 (a sanitização no export cobre qualquer campo de qualquer
+   tabela; essa validação fecha a entrada especificamente pro nome de
+   usuário, que é o campo mais citado em descrições de log de auditoria).
+
+4. **JWT não invalidado ao trocar senha** — um token roubado continuava
+   válido até expirar (até 8h) mesmo depois do dono trocar a senha por
+   suspeita de acesso indevido. Nova coluna `senha_alterada_em` em
+   `usuarios` e `super_admins` (migration
+   `20260729010000_senha_alterada_em.sql`, `DEFAULT now()` — **efeito
+   colateral esperado**: aplicar essa migration em produção invalida
+   todas as sessões abertas naquele instante, forçando um novo login;
+   aceitável, sem perda de dado). Toda rota que troca senha
+   (`PUT /auth/senha`, `POST /auth/redefinir-senha`,
+   `PATCH /usuarios/:id/redefinir-senha`, `PUT /superadmin/perfil/senha`,
+   `PATCH /superadmin/admins/:id/senha`,
+   `PATCH /superadmin/associacoes/:id/resetar-senha-admin`) agora grava
+   `senha_alterada_em = now()`. `autenticar()`/`autenticarSuperAdmin()`
+   (`middleware/auth.js`) comparam `payload.iat` (segundos, padrão do JWT)
+   com `senha_alterada_em` arredondado pro mesmo segundo
+   (`Math.floor(getTime()/1000)`) — **bug real encontrado e corrigido
+   durante o teste**: a primeira versão comparava `iat * 1000` (sempre
+   arredondado pra baixo, `:000ms`) direto contra o timestamp em
+   milissegundos do Postgres, o que rejeitava até o token **recém-emitido
+   na mesma resposta** quando as duas ações caíam no mesmo segundo (ex.:
+   `PUT /superadmin/perfil/senha` reemite token, mas ele vinha inválido de
+   cara). `PUT /superadmin/perfil/senha` não reemitia token nenhum antes
+   dessa correção — agora devolve `token` novo na resposta, e
+   `superadmin.html` foi atualizado pra salvar esse token
+   (senão o próprio Super Admin ficaria "deslogado" ao trocar a própria
+   senha, sem nenhum aviso).
+
+5. **Race condition em `POST /plano/solicitar-contratacao`** — o `SELECT`
+   de "já existe pendente" e o `INSERT` seguinte não eram atômicos; duas
+   requisições simultâneas passavam as duas pelo `SELECT` antes de
+   qualquer uma inserir, criando duas solicitações pendentes. Índice único
+   parcial `solicitacoes_plano_pendente_unica` (migration
+   `20260729020000_solicitacao_plano_indice_unico.sql`, `ON
+   solicitacoes_plano (associacao_id) WHERE status = 'pendente'`) garante
+   isso no próprio Postgres; a rota trata a violação (`err.code ===
+   '23505'`) com um 409 amigável. O `SELECT` antigo continua existindo só
+   como saída rápida no caso comum — a garantia real agora é o índice.
+   Testado disparando 2 requisições `curl` em paralelo de verdade (`&` +
+   `wait`) — confirmado só uma linha `pendente` no banco depois.
+
+**Todos os 5 testados em staging** com dados de teste criados e apagados
+via `comConexaoSuperAdmin()`/`pool` direto (associações e super-admins de
+teste, nunca produção). Nenhuma alteração em produção ainda — aguardando
+decisão do usuário sobre quando aplicar as duas migrations lá.
+
+**Itens de severidade baixa da mesma auditoria, NÃO corrigidos ainda**
+(ficaram de fora do escopo desta rodada, o usuário priorizou só os
+médios): upload de logo do Super Admin sem limite de tamanho como as
+outras rotas de imagem; log de auditoria duplicando a logo em base64
+inteira a cada edição de associação (mesmo sem tocar na logo); uma
+mensagem de erro em `painel/index.html` (`/atividades`) inserida via
+`innerHTML` sem escapar; `cidade`/`estado` não escapados no card
+"Últimas associações" do Dashboard do Super Admin (self-XSS apenas, só o
+próprio Super Admin escreve esse campo hoje); ~10 vulnerabilidades
+transitivas da cadeia do `exceljs` (`npm audit`, sem fix sem downgrade
+major). Também levantados nessa auditoria, fora do escopo de código:
+ausência de envio real de e-mail (esqueci-senha só orienta contatar o
+admin), ausência de política de privacidade/LGPD (a plataforma guarda
+CPF/RG/endereço/foto), e o texto da landing page sobre "backups
+automáticos diários"/"monitoramento contínuo" que não tem nenhuma
+ferramenta configurada por trás ainda.
+
+## Gating de funcionalidades por plano (Fase 2 da melhoria de planos, 29/07/2026)
+
+Depois de renomear os planos (seção seguinte), implementado o gating de
+verdade — antes disso nenhuma das funcionalidades que a `landing.html`
+anuncia por plano tinha qualquer diferenciação no código, todas
+funcionavam igual pra Básico/Intermediário/Avançado. Matriz confirmada
+com o usuário antes de escrever código (mesmo cuidado que os perfis de
+acesso granulares tiveram em 28/07):
+
+| Funcionalidade | Básico | Intermediário | Avançado |
+|---|:---:|:---:|:---:|
+| Alertas automáticos de vencimento (editar) | ❌ | ✅ | ✅ |
+| Perfis de acesso granulares (atribuir) | ❌ | ✅ | ✅ |
+| Exportar leituras de comunicado (Excel/PDF) | ❌ | ✅ | ✅ |
+| Carteirinha digital do associado | ❌ | ✅ | ✅ |
+| Auditoria (ver + exportar) | ❌ | ❌ | ✅ |
+| Limite de associados (50/200/∞) | aviso apenas, nunca bloqueia | | |
+
+Três decisões de produto confirmadas antes de implementar:
+1. **Grandfathering**: quem já usa uma funcionalidade continua usando —
+   só bloqueia atribuir/configurar algo NOVO além do que o plano permite.
+   Nenhuma migration de dados existentes, nenhum usuário/config existente
+   é tocado.
+2. **Limite de associados nunca bloqueia** — é só aviso/upsell no
+   Dashboard (`GET /plano`, campos novos `limite_associados`/
+   `perto_do_limite`). `POST /associados` continua sem nenhuma checagem
+   de teto, de propósito.
+3. **Enforcement é backend real (403) + esconder no front** — mesmo
+   padrão de segurança já usado nos perfis granulares (28/07): esconder só
+   no front nunca é a proteção de verdade.
+
+**`utils/precos.js`** ganhou `NIVEL_PLANO` (hierarquia — `trial: 99,
+basico: 1, intermediario: 2, avancado: 3`; trial recebe o nível mais alto
+porque a promessa comercial da landing é "acesso completo a todos os
+recursos" durante a avaliação), `planoAtendeNivel(planoAtual,
+nivelMinimo)` e `LIMITE_ASSOCIADOS_PLANO` (`{ basico: 50, intermediario:
+200, avancado: null }`, só informativo).
+
+**`middleware/auth.js`** ganhou `exigirPlano(nivelMinimo)`, no mesmo
+molde de `bloquearTrialExpirado` — usar depois de `autorizar(...)` na
+rota. Reaproveita `req.usuario.plano`, que já vinha fresco do banco a
+cada requisição desde o trial (ver seção "Plano Trial com expiração"
+abaixo) — não precisou de nenhuma query nova. Resposta 403 padronizada:
+`{ erro, codigo: 'PLANO_INSUFICIENTE', plano_necessario }`.
+
+Aplicado:
+- `PUT /configuracoes/alertas` → `exigirPlano('intermediario')`. `GET`
+  continua liberado pra qualquer plano/papel (ler o valor atual não é o
+  que está sendo vendido, configurá-lo é).
+- `GET /comunicados/:id/leituras/exportar/:formato` →
+  `exigirPlano('intermediario')`.
+- `GET /auditoria` e `GET /auditoria/exportar/:formato` →
+  `exigirPlano('avancado')` (mais restrito que o resto — nem o
+  Intermediário libera).
+- `POST /usuarios` e `PUT /usuarios/:id` (`routes/usuarios.js`) — **não**
+  usa `exigirPlano` como middleware de rota inteira (a rota aceita vários
+  papéis, só alguns são gated). Checagem condicional inline: só bloqueia
+  quando `papel` do corpo da requisição é um de `PAPEIS_GRANULARES`
+  (`financeiro/atendimento/operador/consulta`) **e** o plano não atende.
+  Em `PUT`, como `papel` é opcional (`COALESCE` mantém o valor atual se
+  não vier no corpo), editar só o nome de um usuário já-financeiro nunca
+  passa pela checagem — é assim que o grandfathering funciona sem
+  precisar de nenhuma lógica extra de "usuário legado".
+- Carteirinha digital (`portal.html`) **não tem checagem de backend** —
+  é montada inteiramente com dado que `GET /portal/meus-dados` já expõe
+  pro próprio associado (nome, foto, categoria, status), não existe um
+  recurso adicional pra proteger no servidor. O gate aqui é só de UI
+  (esconder o botão), documentado como exceção deliberada à regra
+  "backend + front" — não haveria o que bloquear no backend sem inventar
+  uma rota nova só pra isso.
+
+**JWT ganhou o claim `plano`** (`assinarToken`, `routes/auth.js`) — só
+pra decisão de UI no front (qualquer papel de usuário, não só admin/
+diretoria, precisa saber o plano pra esconder botão/aba). Buscado junto
+no `SELECT` de `buscarUsuarioPorEmail` (`a.plano`, já tinha o JOIN com
+`associacoes`). **Nunca é a fonte de verdade da permissão real** — o
+bloqueio de fato é sempre `exigirPlano()` no backend, que revalida
+`req.usuario.plano` fresco do banco a cada requisição (não confia no
+claim do token, que pode ficar até 8h desatualizado se o plano mudar no
+meio da sessão — mesmo caveat que já existia pra `papel`/`nome` antes
+disso, não é uma classe nova de risco).
+
+**`GET /plano`** ganhou `limite_associados` e `perto_do_limite` (>= 90%
+da faixa do plano) — só leitura, `POST /associados` continua sem
+nenhuma checagem de limite.
+
+**Testado em staging** com 3 associações de teste (uma por plano,
+`TESTE_GATING_basico/intermediario/avancado`, criadas e apagadas via
+`comConexaoSuperAdmin`) via `curl` direto contra `node server.js` local
+apontando pro banco de staging: os 3 gates 403 confirmados por plano
+(alertas, auditoria, atribuir papel granular), grandfathering confirmado
+(usuário `financeiro` inserido diretamente no banco pra simular "já
+existia antes do gating" — login funcionou normalmente, editar só o nome
+funcionou, trocar pra outro papel granular foi bloqueado, trocar pra um
+papel não-granular como `diretoria` funcionou), export de leituras
+bloqueado no Básico e funcionando no Intermediário (Excel real gerado,
+6.5KB), `GET /plano` com `limite_associados`/`perto_do_limite` corretos
+pros 3 planos.
+
+## Planos renomeados: profissional/enterprise → intermediario/avancado (29/07/2026)
+
+Alinhamento com a nova nomenclatura da landing page (`painel/landing.html`,
+ver `painel/CLAUDE.md`): Básico/Intermediário/Avançado em vez de
+Básico/Profissional/Enterprise. Preços e faixas de porte **não mudaram**,
+só o nome.
+
+Migration `20260729000000_renomear_planos_intermediario_avancado.sql`:
+`ALTER TYPE plano_assinatura RENAME VALUE 'profissional' TO 'intermediario'`
+e o mesmo para `'enterprise' TO 'avancado'`. **`RENAME VALUE` só troca o
+rótulo no catálogo do tipo (`pg_enum`)** — o valor interno (oid) não muda,
+então nenhuma linha de `associacoes.plano` precisou de `UPDATE`; qualquer
+associação que já estava em `profissional` passa a aparecer como
+`intermediario` automaticamente, sem migração de dados. Testado em staging
+antes do deploy: `enum_range` confirmado (`trial, basico, intermediario,
+avancado`), insert/select/update/delete numa associação de teste
+(`TESTE_MIGRATION_PLANOS`, criada e apagada via `comConexaoSuperAdmin`) e
+`calcularValorMensalidade()` batendo com os valores da landing page
+(R$ 249,90 com 100 associados no Intermediário, R$ 499,90 com 300 no
+Avançado).
+
+Valores internos do enum continuam **sem acento** (`intermediario`,
+`avancado`), seguindo o padrão já usado por `trial`/`basico` — acentuação
+só existe nos rótulos exibidos no front (`ROTULOS_PLANO`/`INFO_PLANO`).
+
+Atualizado em conjunto: `utils/precos.js` (chaves de `PRECOS_PLANO`),
+`routes/plano.js` (`PLANOS_CONTRATAVEIS`, mensagem de erro de validação).
+`routes/superadmin.js` não precisou de mudança — não tem whitelist própria
+de valores de plano, o enum do banco já rejeita qualquer valor fora da
+lista. Ver `painel/CLAUDE.md` pra a parte do front (`superadmin.html`,
+`index.html`).
+
+**Se migrar produção**: mesmo comando, rodado no SQL Editor do Supabase de
+produção (`gahrgdpjuqfjkznqtszd`) depois de validado em staging — só
+depois de confirmação explícita do usuário, seguindo o fluxo já
+estabelecido pro projeto.
 
 ## Ambiente de homologação (staging) — novo (27/07/2026)
 
@@ -107,6 +755,28 @@ qualquer momento; mudanças que afetam quem já está conectado (trocar
 coordenadas com o deploy — ver `supabase/README.md`, seção RLS, que
 documenta um incidente real causado por não seguir essa ordem.
 
+**Isso aconteceu de verdade em 28/07/2026**: o `.env` local estava com a
+`DATABASE_URL` de **produção** (`db.gahrgdpjuqfjkznqtszd.supabase.co`,
+conexão direta, nem era o pooler) enquanto se acreditava (confirmado
+verbalmente, sem checar de fato) que era staging. Dois fluxos de teste
+ponta a ponta (upload de logo da associação, ficha do associado — ambos
+criando associação/usuário de teste via `pool.query` direto e apagando
+depois) rodaram sem querer contra produção antes do engano ser percebido
+— só descoberto quando uma migration deu "column already exists" no
+Supabase (sinal de que só produção já tinha aquela coluna). Sem dano
+porque a limpeza dos dados de teste sempre rodou e foi conferida vazia
+logo em seguida, mas foi sorte de o hábito de limpar já existir, não
+segurança de processo. **Os dois refs corretos, pra conferir sempre antes
+de rodar algo local:**
+- Produção: `minha_associacao`, ref `gahrgdpjuqfjkznqtszd`.
+- Staging: `minha-associacao-staging`, ref `dlthgkvvzyssmkzehksz`, pooler
+  `aws-0-sa-east-1.pooler.supabase.com:5432`, usuário
+  `app_runtime.dlthgkvvzyssmkzehksz`.
+
+Não basta perguntar "é staging?" e aceitar um "sim" — conferir o próprio
+host/ref da `DATABASE_URL` contra essa lista antes de rodar qualquer
+script que crie/apague dado, mesmo que seja "só um teste rápido".
+
 ## Arquitetura em uma imagem
 
 - `server.js` → monta as rotas, `config/env.js` valida env vars e derruba
@@ -197,6 +867,16 @@ antes que o ambiente de destino suporta IPv6, ou usar sempre o pooler.
 
 ## Instabilidade intermitente do pooler — causa encontrada e mitigada (26-27/07/2026)
 
+> **DESATUALIZADO EM 07/08/2026 — leia antes a seção "CAUSA RAIZ da
+> instabilidade intermitente: RLS castando GUC vazio" no topo deste
+> arquivo.** A hipótese registrada abaixo ("resposta de outra query
+> vazando pela conexão") estava **errada**. A causa real é a policy de RLS
+> fazendo `current_setting('app.current_associacao_id', true)::uuid` numa
+> conexão reciclada pelo PgBouncer, onde esse GUC volta como string vazia
+> em vez de NULL. O resto desta seção continua valendo como histórico e
+> pelas mitigações (retry, `pool.on('error')`, o caso do
+> `statement_timeout` no startup packet), que seguem em pé.
+
 De vez em quando (mais depois de reconexões "a frio", ex. após um período
 ocioso), `autenticar()` e a query de login do backend recebiam do Postgres
 `invalid input syntax for type uuid: ""` (`code: 22P02`) — inclusive em
@@ -245,6 +925,23 @@ voltou a ser raro (mesmo comportamento de antes de 26/07).
 **Se voltar a acontecer**: pegar o erro exato do log do Render (o
 `console.error(err)` de `autenticar()`/error handler mostra a query e o
 código `22P02`) e considerar abrir chamado com o suporte do Supabase.
+
+**27/07/2026 (continuação) — voltou a acontecer em staging, retry reforçado
+em 3 pontos**: o mesmo sintoma apareceu várias vezes no ambiente de
+staging (não produção) no mesmo dia em que staging foi criado, inclusive
+sem eu estar rodando nenhum script pesado num dos casos — sugere que o
+projeto Supabase de staging pode ter um pooler com menos fôlego que o de
+produção (plano/tier menor, vale o usuário conferir no dashboard). Reforço
+aplicado enquanto isso (não resolve a causa raiz, reduz a chance do
+usuário ver o erro): `autenticar()`, `comConexaoComSessao()` (usada por
+`comConexaoTenant`/`SuperAdmin`/`Auth`) e `buscarUsuarioPorEmail()` (login)
+foram de 2 para **3 tentativas**, com uma espera curta e crescente entre
+elas (`150ms * tentativa`, função `aguardar()`) em vez de tentar de novo
+imediatamente na mesma janela ruim. `autenticarSuperAdmin()` **não tinha
+nenhum retry antes** (usava `pool.query()` direto, sem a proteção que as
+outras três já tinham) — ganhou o mesmo tratamento agora, é provavelmente
+a rota que mais aparecia pro usuário como "Erro ao validar sessão" sem
+chance de se recuperar sozinha.
 
 **Cuidado ao investigar**: testes de diagnóstico pesados (dezenas/centenas
 de conexões em sequência rápida) contra produção podem eles mesmos causar
@@ -478,6 +1175,268 @@ super-admin, não só `super_admin` — é ferramenta interna, não algo
 sensível de dado de cliente). `tipo` (`melhoria`/`bug`), `prioridade`
 (`baixa`/`media`/`alta`/`urgente`), `status`
 (`pendente`/`em_andamento`/`concluido`/`cancelado`) são enums novos.
+
+## Auditoria por associação + navegação final de Acessos/Parametrização (item de sprint 4, etapa 2, 27/07/2026)
+
+Ajuste pedido depois da etapa 1: a estrutura final não é "Configurações"
+com sub-abas Usuários+Parametrização — é **"Acessos"** na sidebar
+(Usuários + Auditoria) e **"Parametrização"** só alcançável pelo
+"Preferências" do header, sem item próprio na sidebar. Ver
+`painel/CLAUDE.md` pra como isso ficou na navegação.
+
+Rota nova `routes/auditoria.js` (montada em `/auditoria`, `server.js`),
+espelhando `GET /superadmin/logs` só que já escopado por tenant — **não
+precisou de política de RLS nova**: `logs_auditoria_select_tenant` (`WHERE
+associacao_id = current_setting('app.current_associacao_id')::uuid`) já
+existia desde a Fase 2 do Super Admin (`20260726110000_logs_auditoria.sql`),
+só nunca tinha ganhado uma rota própria pro admin/diretoria de uma
+associação consultar os próprios logs — todas as rotas que já chamam
+`registrarLogAuditoria()` (associados/cobrancas/comunicados/usuarios/
+configuracoes/auth/plano) já estavam alimentando essa tabela desde 26/07,
+os dados já existiam, só não tinham como ser vistos por quem não fosse
+Super Admin.
+
+`GET /auditoria` e `GET /auditoria/exportar/:formato` reaproveitam
+`construirFiltros`/paginação no mesmo formato de `superadmin.js`, mas sem
+os campos que não fazem sentido num tenant único (`associacao`,
+`administradores` como módulo). Export reaproveita `gerarExcelLogs`/
+`gerarPdfLogs` de `utils/exportarLogs.js` **sem nenhuma mudança** — as
+colunas genéricas (usuário/associação/módulo/ação/descrição/ip) já
+funcionam aqui, `associacao_nome` só fica vazio (`—`) porque a query
+tenant não faz join com `associacoes`, inofensivo.
+
+## Reestruturação da sidebar — "Acessos e Usuários" (item de sprint 4, etapa 1, 27/07/2026)
+
+Primeira etapa (só a de "Acessos e Usuários") do pedido maior de unificar
+Usuários + Configurações num só menu "Configurações" com submenus — as
+demais seções de Parametrização (Financeiro/Alertas/Comunicação/
+Associados/Sistema/Segurança/Integrações) ficam pra sprints futuras, a
+pedido do usuário, um item por vez.
+
+`routes/usuarios.js`:
+- `GET /` ganhou `ultimo_acesso` (subquery `MAX(auth_logs.criado_em) WHERE
+  evento = 'login_sucesso'` por usuário — não precisou de coluna nova,
+  `auth_logs` já registrava isso desde sempre, só nunca tinha sido
+  exposto). `criado_em` já vinha, agora é usado no front também.
+- `PATCH /:id/reativar` (novo) — inverso de `/:id/desativar`, que já
+  existia; antes não tinha como reverter uma desativação pela UI.
+- `PATCH /:id/redefinir-senha` (novo) — gera senha provisória nova
+  (`deve_trocar_senha = true`), mesmo padrão de "credenciais geradas" já
+  usado em toda a plataforma. **`POST /:id/gerar-link-redefinicao` (rota
+  antiga, token + e-mail) nunca teve consumidor no front-end** — descoberto
+  ao procurar onde ficava "alterar senha" na tela de Usuários e não achar
+  nada; ficou órfã desde que foi criada. Não removida (pode ter uso futuro
+  com envio de e-mail de verdade), só documentada aqui pra não confundir.
+
+**Não implementado nessa etapa, de propósito** — "Perfil de acesso"
+(Administrador/Financeiro/Atendimento/Operador/Somente Consulta) e RBAC
+granular: o pedido original já dizia "quando implementado"/"estrutura
+preparada", ou seja, é reconhecidamente trabalho futuro. Adicionar esses
+papéis exigiria alterar o enum `papel` no banco e revisar toda chamada
+`autorizar(...)` do projeto — perigoso demais pra entrar de brinde numa
+etapa que era só reorganização de navegação. Fica registrado aqui como
+pendência conhecida pra quando o usuário pedir essa etapa especificamente.
+
+## Confirmação de leitura dos comunicados (item de sprint 3, 27/07/2026)
+
+`GET /comunicados` ganhou `total_destinatarios` (contagem de `usuarios`
+`papel='associado'` `ativo` da associação — mesmo critério usado nas
+rotas novas abaixo). `categoria_alvo` continua sendo só rótulo informativo
+(não filtra quem recebe, ver comentário já existente na rota) — por isso
+o universo de destinatários é "todo associado ativo com login", não
+filtrado por categoria.
+
+Duas rotas novas em `routes/comunicados.js` (admin/diretoria):
+- `GET /comunicados/:id/leituras` — devolve `{ titulo, leituras: [...] }`,
+  uma linha por `usuario` `papel='associado'` `ativo` da associação
+  (`LEFT JOIN comunicado_leituras`), com `lido`/`lido_em`. Como
+  `comunicado_leituras` tem `UNIQUE(comunicado_id, usuario_id)`,
+  `criado_em` já É a primeira (e única) leitura — não precisou de coluna
+  nova pra "primeira visualização". Sem paginação (mesma lógica de
+  `GET /cobrancas?associado_id=X`, filtro fica no front) — se uma
+  associação muito grande (milhares de associados) sentir lentidão aqui,
+  vale paginar depois.
+- `GET /comunicados/:id/leituras/exportar/:formato` (`excel`|`pdf`) —
+  `utils/exportarLeiturasComunicado.js` (novo, mesmo padrão de
+  `utils/exportarLogs.js`: `exceljs`/`pdfkit`, PDF desenhado manualmente).
+  Registra a própria exportação como linha de auditoria (`tipo_acao:
+  'exportacao'`), mesmo padrão de `GET /superadmin/logs/exportar/:formato`.
+
+**Não implementado, era "opcional" no pedido**: dispositivo usado na
+leitura — `comunicado_leituras` não tem coluna pra isso, exigiria
+capturar `User-Agent` em `POST /comunicados/:id/marcar-lido` e uma
+migration nova. Fica pra quando/se for pedido de verdade.
+
+## Ficha completa do associado + histórico financeiro/comunicados (itens de sprint 2.1-2.3, 27/07/2026)
+
+`associados` ganhou 8 colunas novas (migration `20260727150000_ficha_associado.sql`,
+aditiva): `rg` e endereço estruturado (`endereco_cep`, `endereco_logradouro`,
+`endereco_numero`, `endereco_complemento`, `endereco_bairro`,
+`endereco_cidade`, `endereco_estado`). Sem campo de veículo — descartado
+explicitamente pelo usuário. "Plano contratado" da ficha **não é campo
+novo**, é o `categoria` já existente, só relabelado na UI.
+
+`GET/POST/PUT /associados` (`routes/associados.js`) passaram a
+selecionar/aceitar essas colunas, além de `criado_em` (não vinha antes).
+
+**2.2 (histórico financeiro) não precisou de rota nova** — `GET
+/cobrancas?associado_id=X` já existia e já tinha tudo (valor, vencimento,
+`pago_em`, `metodo`, `status`/`status_exibicao`, `tem_comprovante`);
+`GET /cobrancas/:id/comprovante` também já existia. O filtro por
+período/ano é só client-side (`painel/index.html`), sem parâmetro novo na
+API.
+
+**2.3 (histórico de comunicados) ganhou rota nova**: `GET
+/associados/:id/comunicados` (admin/diretoria), aceita `?lido=lidos` ou
+`?lido=nao_lidos` (ausente = todos). Mesma regra de visibilidade que o
+associado teria no portal dele — só comunicados `status = 'ativo'` já
+`publicado_em <= now()` (ver `routes/comunicados.js`) — join com
+`comunicado_leituras` pelo `usuario_id` do associado (`associados.usuario_id`,
+pode ser `null` se a conta de login foi removida; nesse caso tudo aparece
+como não lido, comportamento aceitável).
+
+## Alerta inteligente de renovação do plano (item de sprint 1.4, 27/07/2026)
+
+`associacoes` ganhou `dias_alerta_assinatura` (migration
+`20260727140000_alerta_vencimento_assinatura.sql`, aditiva, default 30) —
+configurável só pelo Super Admin, por associação, num select fechado
+(`30/20/15/10/7/3`, `DIAS_ALERTA_ASSINATURA_VALIDOS` em
+`routes/superadmin.js`, validado no `POST`/`PUT /associacoes`). **Não
+confundir com `dias_alerta_vencimento`**, coluna mais antiga e
+semanticamente diferente: essa é sobre cobranças pendentes dos
+*associados* de cada associação (mensalidades), configurada pela própria
+associação em Configurações; a nova é sobre o vencimento da *assinatura da
+associação com a plataforma*.
+
+`utils/precos.js` ganhou `alertaAssinatura(associacao, hoje)` — devolve
+`null` fora da janela configurada (nada a mostrar), ou
+`{ tipo: 'trial'|'assinatura', dias_restantes, nivel }` com `nivel`
+escalando `atencao` → `alerta` → `critico` conforme a proximidade do
+vencimento (`critico` quando `dias_restantes <= 0`, ou sempre nos últimos
+3 dias de trial). Independente de `statusAssinatura()` (que já existia e
+continua só usando `dias_alerta_vencimento` pra rotular a linha na lista
+do Super Admin — não foi tocada). `GET /plano` (`routes/plano.js`) devolve
+esse objeto em `alerta`; o card `#bloco-plano-dashboard` em
+`painel/index.html` usa isso pra decidir mensagem, cor e se pulsa — ver
+`painel/CLAUDE.md`.
+
+## Melhorias no portal do associado — mini-dashboard, logo da associação, ficha completa (28/07/2026)
+
+Três pedidos separados do usuário no mesmo dia, todos só aditivos:
+
+- **Logo da associação**: `PUT /configuracoes/logo` (novo, `routes/configuracoes.js`, só `admin`) — antes só o Super Admin podia trocar `associacoes.logo_url` (já exibida no header do Dashboard desde 27/07); agora a própria associação também pode, reaproveitando `imagemBase64Valida()` e o mesmo limite de ~2,8MB de `PUT /portal/minha-foto`.
+- **`GET /portal/meus-dados`** ganhou `rg`, `endereco_*` (já existiam em `associados` desde a migration `20260727150000_ficha_associado.sql`, só não eram expostas nessa rota) e `criado_em`, pra alimentar a ficha completa nova no portal (`painel/CLAUDE.md` tem o detalhe do front). **Não inclui `email`** — `associados` não tem essa coluna (o e-mail de login vive em `usuarios`); o front já tinha esse dado disponível decodificando o próprio JWT (`estado.email`), não precisou de rota nova nem de JOIN.
+- Nenhuma rota nova para o mini-dashboard "Início" do portal — reaproveita `GET /portal/meus-dados`, `GET /portal/minhas-cobrancas` e `GET /comunicados`, todas já existentes.
+
+**Gap real encontrado e corrigido de quebra**: `POST /comunicados/:id/marcar-lido` existia desde a Fase 3 (confirmação de leitura, item de sprint 3) mas **nunca tinha um consumidor no `portal.html`** — o associado nunca "marcava como lido" de fato, então o contador de não lidos nunca zeraria. Sem mudança de backend (a rota já existia e já funcionava pra qualquer papel autenticado); só o front passou a chamá-la ao abrir o mural.
+
+## Perfis de acesso granulares: Financeiro/Atendimento/Operador/Consulta (28/07/2026, item 5 do backlog de sugestões)
+
+Esse era o item do backlog mais arriscado dos 3 aplicados no dia — a
+seção "Reestruturação da sidebar" (25/07/2026) já tinha adiado isso de
+propósito, citando risco de mexer no enum + revisar toda chamada
+`autorizar()` do projeto. Antes de implementar, a matriz de permissões
+exata foi confirmada com o usuário (não assumida) — decisão de produto,
+não só técnica.
+
+`papel_usuario` ganhou 4 valores (migration
+`20260728100000_perfis_acesso_granulares.sql`, 4 `ALTER TYPE ... ADD
+VALUE` em instruções separadas — não dá pra combinar num único comando,
+e nenhuma delas pode ser usada na mesma transação em que foi adicionada,
+mas como são só isso no arquivo, sem uso junto, é seguro colar direto no
+SQL Editor). Matriz aplicada via `autorizar(...)` em cada rota, sem
+tocar em `admin`/`diretoria`/`associado`:
+
+| Perfil | Associados | Cobranças | Comunicados | Usuários/Config |
+|---|---|---|---|---|
+| Financeiro | ver | ver + criar/editar/pagar | ver | — |
+| Atendimento | ver + criar/editar | ver | ver + criar/editar/excluir | — |
+| Operador | ver + criar/editar | ver + criar/editar/pagar | ver + criar/editar/excluir | — |
+| Consulta | ver | ver | ver | — |
+
+`estornar`/`excluir` de cobrança e `excluir` de associado continuam
+**só admin** pros 4 perfis novos também — mesma restrição que já existia
+pra `diretoria`, estendida sem abrir exceção nova. Auditoria e atividades
+(feed do Dashboard) são "ver" pros 4, mesmo raciocínio de informação não
+sensível já usado pra `diretoria`.
+
+**Detalhe fácil de esquecer**: `GET /comunicados` (`routes/comunicados.js`)
+não tem `autorizar()` próprio — decide o comportamento internamente com
+uma variável `ehGestor` (`admin`/`diretoria` veem tudo com stats de
+leitura; qualquer outro papel vê só o que um associado veria, filtrado e
+com flag `lido`). Os 4 perfis novos precisaram entrar nessa lista
+também, senão um usuário `financeiro` legitimamente autorizado a ver
+comunicados enxergaria a versão errada (a de associado) em vez da
+gerencial.
+
+**Testado contra staging** com uma matriz de 22 combinações
+papel×rota/verbo (associação + 4 usuários de teste, um por perfil,
+criados e apagados via `comConexaoSuperAdmin()`) — GET liberado pros 4,
+POST/PUT/PATCH batendo o esperado (permitido onde a matriz diz, 403 onde
+não), Usuários/Configurações sempre 403. Todas passaram.
+
+## Paginação opt-in em /associados e /cobrancas (28/07/2026, item 6 do backlog de sugestões)
+
+`GET /associados` e `GET /cobrancas` aceitam `?pagina=`/`?por_pagina=`
+(máx. 200/página, mesmo padrão de `GET /auditoria`) e devolvem
+`{ registros, total, pagina, por_pagina }` **só quando esses parâmetros
+vêm na query**. Sem eles, a resposta continua sendo o array puro de
+sempre — decisão deliberada, não meio-termo preguiçoso: o Dashboard do
+painel da associação (KPIs, gráficos de crescimento/receita de 12 meses,
+"últimos associados") e a busca instantânea das telas de Associados/
+Financeiro dependem hoje de ter o array **completo** no cliente
+(`associadosCache`/`cobrancasCache` em `painel/index.html`). Paginar sem
+essa distinção quebraria tudo isso na hora.
+
+**O que isso resolve e o que não resolve**: resolve o "não escala" citado
+na análise (dá pra uma tela nova, ou uma versão futura da lista, pedir só
+50 registros por vez sem sobrecarregar o Postgres numa associação com
+milhares de associados). **Não resolve** a causa raiz de fato — a lista
+de Associados/Financeiro em `index.html` ainda carrega tudo de uma vez
+hoje, porque adotar paginação de verdade nessas telas exigiria mover a
+busca/filtro pro backend também (a busca atual é 100% client-side sobre
+o array já em memória). Isso fica pra quando/se o volume real justificar
+—- a capacidade já existe no backend, só não foi adotada no front ainda.
+
+## Comunicado da plataforma pra todas as associações (28/07/2026, item 7 do backlog de sugestões)
+
+Depois da análise profunda pedida pelo usuário sobre as 3 camadas
+(Super Admin/associação/associado), o primeiro item do backlog resultante
+a ser implementado: o Super Admin não tinha como avisar todas as
+associações de uma vez (só existia comunicado por associação, escrito
+pela própria diretoria).
+
+`comunicados` ganhou `origem_plataforma boolean NOT NULL DEFAULT false`
+(migration `20260728000000_comunicados_plataforma.sql`, aditiva). Nova
+rota `POST /superadmin/comunicados-plataforma` (`autorizarSuperAdmin(...GESTAO)`,
+`routes/superadmin.js`) recebe `titulo`/`conteudo` e faz um `INSERT` em
+`comunicados` **por associação ativa** (`autor_id = NULL`, super-admin não
+é um `usuario` de tenant) — reaproveita o mural que cada associação já
+tem, **nenhuma tabela nem tela de leitura nova precisou ser criada**. Uma
+única linha de auditoria registra o envio (com `total_associacoes` em
+`dados_novos`, não uma linha por associação atingida).
+
+`PUT`/`DELETE /comunicados/:id` (`routes/comunicados.js`) passaram a
+checar `origem_plataforma` antes de aplicar a mudança — 403 se for
+`true`, mesmo pra quem tem papel `admin`/`diretoria` na própria
+associação. Isso existe porque o texto de um aviso oficial da plataforma
+não pode ser adulterado ou apagado por quem só recebeu, só a origem
+(Super Admin) deveria poder gerenciar — e hoje nem o Super Admin tem uma
+rota de edição em massa desses avisos (só criar um novo, se precisar
+corrigir algo é reenviar).
+
+**Testado contra staging com o mesmo padrão de sempre** (associações +
+super-admin de teste via `comConexaoSuperAdmin()`, tudo apagado depois) —
+um detalhe que quase passou despercebido: o broadcast **atingiu uma
+associação real pré-existente no staging** (`Associação_teste1`, não
+criada por esta sessão), porque a rota varre *todas* as associações
+ativas do banco, não só as de teste. Precisou de uma limpeza extra fora
+do fluxo normal do script pra remover só aquela linha de comunicado, sem
+mexer na associação em si. **Lição pra quem for testar rotas de broadcast
+cross-tenant no futuro**: usar sempre um texto de teste claramente
+identificável (ex. prefixo `TESTE_`) mesmo em campos que não são o nome
+da entidade de teste, e checar depois em **todas** as associações
+atingidas, não só nas criadas pelo próprio teste.
 
 ## Isolamento entre tenants (RLS) — já está ativo
 

@@ -1,7 +1,8 @@
 // routes/configuracoes.js
 const express = require('express');
-const { autenticar, bloquearSenhaProvisoria, bloquearTrialExpirado, autorizar, comConexaoTenant } = require('../middleware/auth');
+const { autenticar, bloquearSenhaProvisoria, bloquearTrialExpirado, exigirPlano, autorizar, comConexaoTenant } = require('../middleware/auth');
 const { registrarLogAuditoria } = require('../utils/auditoria');
+const { imagemBase64Valida } = require('../utils/validacao');
 
 const router = express.Router();
 router.use(autenticar);
@@ -83,6 +84,43 @@ router.get('/identidade', async (req, res) => {
     }
 });
 
+// PUT /configuracoes/logo — só admin troca a logo da própria associação
+router.put('/logo', autorizar('admin'), async (req, res) => {
+    const { logo_base64 } = req.body;
+
+    if (!logo_base64) {
+        return res.status(400).json({ erro: 'logo_base64 é obrigatório' });
+    }
+    // Limite de ~2MB em base64, mesmo padrão de /portal/minha-foto
+    if (logo_base64.length > 2_800_000) {
+        return res.status(400).json({ erro: 'Imagem muito grande. Escolha uma logo menor.' });
+    }
+    // Valida o data URL inteiro, não só o prefixo -- ver utils/validacao.js.
+    if (!imagemBase64Valida(logo_base64)) {
+        return res.status(400).json({ erro: 'Formato de imagem inválido. Envie PNG, JPG, GIF ou WEBP.' });
+    }
+
+    const client = await comConexaoTenant(req.usuario.associacao_id);
+    try {
+        await client.query(
+            `UPDATE associacoes SET logo_url = $1 WHERE id = $2`,
+            [logo_base64, req.usuario.associacao_id]
+        );
+        await registrarLogAuditoria(client, {
+            associacaoId: req.usuario.associacao_id, usuarioId: req.usuario.id, usuarioNome: req.usuario.nome, usuarioEmail: req.usuario.email,
+            modulo: 'configuracoes', tipoAcao: 'edicao',
+            descricao: req.usuario.nome + ' atualizou a logo da associação',
+            dadosAnteriores: null, dadosNovos: null, req,
+        });
+        res.json({ ok: true });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ erro: 'Erro ao salvar a logo' });
+    } finally {
+        client.release();
+    }
+});
+
 // GET /configuracoes/alertas — qualquer usuário autenticado pode ler
 router.get('/alertas', async (req, res) => {
     const client = await comConexaoTenant(req.usuario.associacao_id);
@@ -100,8 +138,12 @@ router.get('/alertas', async (req, res) => {
     }
 });
 
-// PUT /configuracoes/alertas — só admin configura
-router.put('/alertas', autorizar('admin'), async (req, res) => {
+// PUT /configuracoes/alertas — só admin configura, e só a partir do plano
+// Intermediário (gating por plano, 29/07/2026 — landing page anuncia
+// "Alertas automáticos de vencimento" como diferencial a partir daí; no
+// Básico o valor fica travado no default, ler GET acima continua liberado
+// pra qualquer papel/plano, só a edição é bloqueada).
+router.put('/alertas', autorizar('admin'), exigirPlano('intermediario'), async (req, res) => {
     const { dias_alerta_vencimento } = req.body;
     const dias = parseInt(dias_alerta_vencimento, 10);
 

@@ -3,12 +3,25 @@ const express = require('express');
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 const { autenticar, bloquearSenhaProvisoria, bloquearTrialExpirado, autorizar, comConexaoTenant } = require('../middleware/auth');
-const { emailValido, gerarSenhaProvisoria } = require('../utils/validacao');
+const { emailValido, nomeValido, gerarSenhaProvisoria } = require('../utils/validacao');
+const { planoAtendeNivel } = require('../utils/precos');
+
+// Perfis de acesso granulares (item 5 do backlog, 28/07/2026) são
+// diferencial do plano Intermediário+ na landing page (29/07/2026) --
+// gating por plano, com grandfathering: só bloqueia ATRIBUIR um desses
+// papéis agora (criar ou editar); usuário que já tinha um desses papéis
+// antes de a associação estar num plano que não permite continua
+// funcionando normalmente (a checagem não roda em cima de dado existente,
+// só na hora de gravar um valor novo).
+const PAPEIS_GRANULARES = ['financeiro', 'atendimento', 'operador', 'consulta'];
 const { registrarEventoAuth } = require('../utils/authLog');
 const { registrarAtividade } = require('../utils/atividadeLog');
 const { registrarLogAuditoria } = require('../utils/auditoria');
 
+const paramUuid = require('../middleware/paramUuid');
 const router = express.Router();
+// Rejeita :id que nao seja uuid com 400, em vez de deixar virar 500 no Postgres
+router.param('id', paramUuid);
 router.use(autenticar);
 router.use(bloquearSenhaProvisoria);
 router.use(bloquearTrialExpirado);
@@ -18,10 +31,12 @@ router.get('/', autorizar('admin'), async (req, res) => {
     const client = await comConexaoTenant(req.usuario.associacao_id);
     try {
         const resultado = await client.query(
-            `SELECT id, nome, email, papel, ativo, criado_em
-             FROM usuarios
-             WHERE associacao_id = $1
-             ORDER BY criado_em`,
+            `SELECT u.id, u.nome, u.email, u.papel, u.ativo, u.criado_em,
+                    (SELECT MAX(l.criado_em) FROM auth_logs l
+                      WHERE l.usuario_id = u.id AND l.evento = 'login_sucesso') AS ultimo_acesso
+             FROM usuarios u
+             WHERE u.associacao_id = $1
+             ORDER BY u.criado_em`,
             [req.usuario.associacao_id]
         );
         res.json(resultado.rows);
@@ -42,14 +57,24 @@ router.post('/', autorizar('admin'), async (req, res) => {
     if (!nome || !email || !papel) {
         return res.status(400).json({ erro: 'nome, email e papel são obrigatórios' });
     }
+    if (!nomeValido(nome)) {
+        return res.status(400).json({ erro: 'nome inválido (máximo 120 caracteres, sem caracteres de controle)' });
+    }
     if (!emailValido(email)) {
         return res.status(400).json({ erro: 'e-mail inválido' });
     }
-    if (!['diretoria', 'associado'].includes(papel)) {
-        return res.status(400).json({ erro: 'papel deve ser "diretoria" ou "associado"' });
+    if (!['diretoria', 'financeiro', 'atendimento', 'operador', 'consulta', 'associado'].includes(papel)) {
+        return res.status(400).json({ erro: 'papel inválido' });
     }
     if (papel === 'associado' && !associado_id) {
         return res.status(400).json({ erro: 'associado_id é obrigatório para o papel "associado"' });
+    }
+    if (PAPEIS_GRANULARES.includes(papel) && !planoAtendeNivel(req.usuario.plano, 'intermediario')) {
+        return res.status(403).json({
+            erro: 'Perfis de acesso granulares (Financeiro, Atendimento, Operador, Somente Consulta) exigem o plano Intermediário ou superior.',
+            codigo: 'PLANO_INSUFICIENTE',
+            plano_necessario: 'intermediario',
+        });
     }
 
     // Gerado/hasheado antes de pegar a conexão -- ver mesmo comentário em
@@ -65,7 +90,7 @@ router.post('/', autorizar('admin'), async (req, res) => {
             `INSERT INTO usuarios (associacao_id, nome, email, senha_hash, papel, deve_trocar_senha)
              VALUES ($1, $2, $3, $4, $5, true)
              RETURNING id, nome, email, papel, ativo, criado_em`,
-            [req.usuario.associacao_id, nome, email, senhaHash, papel]
+            [req.usuario.associacao_id, nome.trim(), email, senhaHash, papel]
         );
         const novoUsuario = resultado.rows[0];
 
@@ -221,6 +246,71 @@ router.patch('/:id/desativar', autorizar('admin'), async (req, res) => {
     }
 });
 
+// PATCH /usuarios/:id/reativar — reativa um usuário desativado (só admin)
+router.patch('/:id/reativar', autorizar('admin'), async (req, res) => {
+    const { id } = req.params;
+    const client = await comConexaoTenant(req.usuario.associacao_id);
+    try {
+        const resultado = await client.query(
+            `UPDATE usuarios SET ativo = true WHERE id = $1 AND associacao_id = $2 RETURNING id, nome`,
+            [id, req.usuario.associacao_id]
+        );
+        if (resultado.rows.length === 0) {
+            return res.status(404).json({ erro: 'Usuário não encontrado' });
+        }
+        await registrarLogAuditoria(client, {
+            associacaoId: req.usuario.associacao_id, usuarioId: req.usuario.id, usuarioNome: req.usuario.nome, usuarioEmail: req.usuario.email,
+            modulo: 'usuarios', tipoAcao: 'edicao',
+            descricao: req.usuario.nome + ' reativou o usuário ' + resultado.rows[0].nome,
+            dadosAnteriores: { ativo: false }, dadosNovos: { ativo: true }, req,
+        });
+        res.json({ ok: true });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ erro: 'Erro ao reativar usuário' });
+    } finally {
+        client.release();
+    }
+});
+
+// PATCH /usuarios/:id/redefinir-senha — admin gera uma senha provisória nova
+// pra outro usuário da associação (mesmo padrão de "credenciais geradas" já
+// usado em POST /associados e PATCH .../resetar-senha-admin do superadmin --
+// mais direto que o link por e-mail de POST /:id/gerar-link-redefinicao, que
+// não tem consumidor no front hoje).
+router.patch('/:id/redefinir-senha', autorizar('admin'), async (req, res) => {
+    const { id } = req.params;
+
+    // Gerado/hasheado fora da conexão do pool -- ver comentário equivalente
+    // em routes/associados.js (POST /).
+    const senhaProvisoria = gerarSenhaProvisoria();
+    const senhaHash = await bcrypt.hash(senhaProvisoria, 10);
+
+    const client = await comConexaoTenant(req.usuario.associacao_id);
+    try {
+        const resultado = await client.query(
+            `UPDATE usuarios SET senha_hash = $1, deve_trocar_senha = true, senha_alterada_em = now()
+             WHERE id = $2 AND associacao_id = $3 RETURNING id, nome, email`,
+            [senhaHash, id, req.usuario.associacao_id]
+        );
+        if (resultado.rows.length === 0) {
+            return res.status(404).json({ erro: 'Usuário não encontrado' });
+        }
+        await registrarLogAuditoria(client, {
+            associacaoId: req.usuario.associacao_id, usuarioId: req.usuario.id, usuarioNome: req.usuario.nome, usuarioEmail: req.usuario.email,
+            modulo: 'usuarios', tipoAcao: 'alteracao_senha',
+            descricao: req.usuario.nome + ' gerou uma senha provisória nova para ' + resultado.rows[0].nome,
+            req,
+        });
+        res.json({ ...resultado.rows[0], senha_provisoria: senhaProvisoria });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ erro: 'Erro ao redefinir senha' });
+    } finally {
+        client.release();
+    }
+});
+
 // PUT /usuarios/:id — edita nome e papel de um usuário (só admin, não pode alterar o próprio papel)
 router.put('/:id', autorizar('admin'), async (req, res) => {
     const { id } = req.params;
@@ -229,11 +319,26 @@ router.put('/:id', autorizar('admin'), async (req, res) => {
     if (!nome || !nome.trim()) {
         return res.status(400).json({ erro: 'nome é obrigatório' });
     }
-    if (papel && !['admin', 'diretoria', 'associado'].includes(papel)) {
+    if (!nomeValido(nome)) {
+        return res.status(400).json({ erro: 'nome inválido (máximo 120 caracteres, sem caracteres de controle)' });
+    }
+    if (papel && !['admin', 'diretoria', 'financeiro', 'atendimento', 'operador', 'consulta', 'associado'].includes(papel)) {
         return res.status(400).json({ erro: 'papel inválido' });
     }
     if (id === req.usuario.id && papel && papel !== 'admin') {
         return res.status(400).json({ erro: 'Você não pode alterar o seu próprio papel' });
+    }
+    // Gating por plano só quando um papel NOVO está sendo atribuído (ver
+    // PAPEIS_GRANULARES acima) -- editar só o nome (papel undefined) nunca
+    // passa por aqui, então um usuário já cadastrado num papel granular
+    // continua com o papel intacto mesmo se a associação estiver num plano
+    // que não permitiria atribuí-lo agora.
+    if (papel && PAPEIS_GRANULARES.includes(papel) && !planoAtendeNivel(req.usuario.plano, 'intermediario')) {
+        return res.status(403).json({
+            erro: 'Perfis de acesso granulares (Financeiro, Atendimento, Operador, Somente Consulta) exigem o plano Intermediário ou superior.',
+            codigo: 'PLANO_INSUFICIENTE',
+            plano_necessario: 'intermediario',
+        });
     }
 
     const client = await comConexaoTenant(req.usuario.associacao_id);
@@ -244,6 +349,22 @@ router.put('/:id', autorizar('admin'), async (req, res) => {
         );
         if (anterior.rows.length === 0) {
             return res.status(404).json({ erro: 'Usuário não encontrado' });
+        }
+
+        // Só o Super Admin designa administrador de associação (decisão de
+        // produto, 07/08/2026). POST /usuarios já rejeitava o papel 'admin',
+        // mas esta rota aceitava -- ou seja, a regra do POST era contornável
+        // em dois passos (criar como 'consulta', depois promover aqui).
+        //
+        // Bloqueia só a PROMOÇÃO, não o valor em si: a tela de edição manda
+        // `papel` sempre, junto com o nome, então recusar 'admin' de forma
+        // cega quebraria editar o nome de um admin que já existe. Quando o
+        // alvo já é admin, o valor é no-op e passa.
+        if (papel === 'admin' && anterior.rows[0].papel !== 'admin') {
+            return res.status(403).json({
+                erro: 'Apenas o Super Admin pode designar um administrador da associação.',
+                codigo: 'PROMOCAO_ADMIN_NEGADA',
+            });
         }
 
         const resultado = await client.query(

@@ -14,6 +14,13 @@ const { limiteLogin, limiteRedefinicao } = require('../middleware/rateLimiter');
 const router = express.Router();
 const JWT_SECRET = config.jwtSecret;
 
+// Hash descartável, só pra gastar o mesmo tempo de CPU quando o e-mail não
+// existe (ver POST /login). Sem isso o bcrypt.compare é simplesmente pulado
+// nesse caso e a resposta volta bem mais rápido -- essa diferença de tempo,
+// sozinha, já denuncia quais e-mails existem na plataforma. Calculado uma vez
+// na subida do processo; o valor em si nunca é usado pra autenticar nada.
+const HASH_INEXISTENTE = bcrypt.hashSync('usuario-inexistente-nunca-autentica', 10);
+
 function assinarToken(usuario) {
     return jwt.sign(
         {
@@ -22,6 +29,14 @@ function assinarToken(usuario) {
             papel: usuario.papel,
             email: usuario.email,
             deve_trocar_senha: usuario.deve_trocar_senha,
+            // Só pra decisão de UI no front (esconder botão de recurso não
+            // incluído no plano, ver painel/CLAUDE.md "Gating de
+            // funcionalidades por plano") -- sem verificação de assinatura
+            // do lado do cliente, então nunca é a fonte de verdade da
+            // permissão real. O bloqueio de fato é sempre no backend
+            // (exigirPlano, middleware/auth.js), que revalida o plano
+            // fresco do banco a cada requisição, não confia nesse claim.
+            plano: usuario.plano,
         },
         JWT_SECRET,
         { expiresIn: '8h' }
@@ -52,28 +67,16 @@ router.post('/login', limiteLogin, async (req, res) => {
 
     try {
         if (!usuario || !usuario.ativo) {
+            // Compara contra um hash descartável só pra gastar o mesmo tempo
+            // de CPU do caminho normal (ver HASH_INEXISTENTE no topo) -- o
+            // resultado é ignorado de propósito.
+            await bcrypt.compare(senha, HASH_INEXISTENTE);
             await registrarEventoAuth(pool, { emailTentado: email, evento: 'login_falha', req });
             await registrarLogAuditoria(pool, {
                 usuarioEmail: email, modulo: 'autenticacao', tipoAcao: 'login',
                 descricao: 'tentativa de login falhou para ' + email, req,
             });
             return res.status(401).json({ erro: 'Credenciais inválidas' });
-        }
-
-        if (!usuario.associacao_ativa) {
-            await registrarEventoAuth(pool, {
-                usuarioId: usuario.id,
-                associacaoId: usuario.associacao_id,
-                emailTentado: email,
-                evento: 'login_falha',
-                req,
-            });
-            await registrarLogAuditoria(pool, {
-                associacaoId: usuario.associacao_id, usuarioId: usuario.id, usuarioNome: usuario.nome, usuarioEmail: email,
-                modulo: 'autenticacao', tipoAcao: 'login',
-                descricao: usuario.nome + ' tentou logar com a associação bloqueada', req,
-            });
-            return res.status(403).json({ erro: 'O acesso da sua associação está temporariamente bloqueado. Fale com o suporte.' });
         }
 
         const senhaCorreta = await bcrypt.compare(senha, usuario.senha_hash);
@@ -91,6 +94,29 @@ router.post('/login', limiteLogin, async (req, res) => {
                 descricao: 'tentativa de login com senha incorreta para ' + usuario.nome, req,
             });
             return res.status(401).json({ erro: 'Credenciais inválidas' });
+        }
+
+        // Só DEPOIS de confirmar a senha é que contamos que a associação está
+        // bloqueada (auditoria de 07/08/2026). Essa checagem vinha antes do
+        // bcrypt.compare, então a mensagem específica -- diferente do 401
+        // genérico -- respondia a quem só tivesse o e-mail, confirmando de
+        // graça que ele existe na plataforma e a qual situação pertence.
+        // Quem acertou a senha é o dono da conta e merece a mensagem útil;
+        // quem não acertou recebe o mesmo 401 de sempre.
+        if (!usuario.associacao_ativa) {
+            await registrarEventoAuth(pool, {
+                usuarioId: usuario.id,
+                associacaoId: usuario.associacao_id,
+                emailTentado: email,
+                evento: 'login_falha',
+                req,
+            });
+            await registrarLogAuditoria(pool, {
+                associacaoId: usuario.associacao_id, usuarioId: usuario.id, usuarioNome: usuario.nome, usuarioEmail: email,
+                modulo: 'autenticacao', tipoAcao: 'login',
+                descricao: usuario.nome + ' tentou logar com a associação bloqueada', req,
+            });
+            return res.status(403).json({ erro: 'O acesso da sua associação está temporariamente bloqueado. Fale com o suporte.' });
         }
 
         const token = assinarToken(usuario);
@@ -124,12 +150,13 @@ router.post('/login', limiteLogin, async (req, res) => {
 // (middleware/auth.js) para falhas transitórias de conexão intermitentes,
 // causa raiz ainda não confirmada.
 async function buscarUsuarioPorEmail(email) {
-    for (let tentativa = 1; tentativa <= 2; tentativa++) {
+    const MAX_TENTATIVAS = 3;
+    for (let tentativa = 1; tentativa <= MAX_TENTATIVAS; tentativa++) {
         const client = await comConexaoAuth();
         try {
             const resultado = await client.query(
                 `SELECT u.id, u.nome, u.email, u.senha_hash, u.papel, u.associacao_id, u.ativo, u.deve_trocar_senha,
-                        a.ativo AS associacao_ativa
+                        a.ativo AS associacao_ativa, a.plano
                  FROM usuarios u
                  JOIN associacoes a ON a.id = u.associacao_id
                  WHERE lower(u.email) = lower($1)`,
@@ -137,8 +164,9 @@ async function buscarUsuarioPorEmail(email) {
             );
             return resultado.rows[0];
         } catch (err) {
-            if (tentativa === 2) throw err;
-            console.error('login: 1a tentativa falhou, tentando de novo com conexao nova:', err.message);
+            if (tentativa === MAX_TENTATIVAS) throw err;
+            console.error('login: tentativa ' + tentativa + ' falhou, tentando de novo com conexao nova:', err.message);
+            await new Promise((resolve) => setTimeout(resolve, 150 * tentativa));
         } finally {
             client.release();
         }
@@ -196,7 +224,7 @@ router.post('/redefinir-senha', limiteRedefinicao, async (req, res) => {
         }
 
         await client.query(
-            `UPDATE usuarios SET senha_hash = $1, deve_trocar_senha = false WHERE id = $2`,
+            `UPDATE usuarios SET senha_hash = $1, deve_trocar_senha = false, senha_alterada_em = now() WHERE id = $2`,
             [senhaHash, registro.usuario_id]
         );
         await client.query(`UPDATE password_resets SET usado = true WHERE id = $1`, [registro.id]);
@@ -269,7 +297,7 @@ router.put('/senha', autenticar, async (req, res) => {
         const clienteEscrita = await comConexaoTenant(req.usuario.associacao_id);
         try {
             await clienteEscrita.query(
-                `UPDATE usuarios SET senha_hash = $1, deve_trocar_senha = false WHERE id = $2`,
+                `UPDATE usuarios SET senha_hash = $1, deve_trocar_senha = false, senha_alterada_em = now() WHERE id = $2`,
                 [novoHash, req.usuario.id]
             );
 
@@ -294,6 +322,26 @@ router.put('/senha', autenticar, async (req, res) => {
     } catch (err) {
         console.error(err);
         res.status(500).json({ erro: 'Erro ao trocar senha' });
+    }
+});
+
+// PATCH /auth/boas-vindas-visto
+// Marca que o usuário logado já fechou o modal de boas-vindas do primeiro
+// acesso (ver GET /plano -> boas_vindas_pendente) -- gravado no banco, não
+// em localStorage, pra não reaparecer ao trocar de navegador/limpar cache.
+router.patch('/boas-vindas-visto', autenticar, async (req, res) => {
+    const client = await comConexaoTenant(req.usuario.associacao_id);
+    try {
+        await client.query(
+            `UPDATE usuarios SET boas_vindas_visto_em = now() WHERE id = $1 AND boas_vindas_visto_em IS NULL`,
+            [req.usuario.id]
+        );
+        res.json({ ok: true });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ erro: 'Erro ao registrar' });
+    } finally {
+        client.release();
     }
 });
 
