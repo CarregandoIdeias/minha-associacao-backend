@@ -1,0 +1,21 @@
+-- Revogação real no logout (auditoria de segurança, Fase 2, 08/08/2026 --
+-- item SEC-004). Até aqui o logout só registrava o evento; um token
+-- roubado continuava válido até expirar (até 8h) mesmo depois do dono
+-- clicar em "Sair" suspeitando de acesso indevido.
+--
+-- Mesmo raciocínio de senha_alterada_em (migration
+-- 20260729010000_senha_alterada_em.sql): payload.iat do token é comparado
+-- contra esta coluna em middleware/auth.js (autenticar/autenticarSuperAdmin).
+--
+-- Nullable, SEM DEFAULT now() de propósito -- diferente de
+-- senha_alterada_em, aqui não faz sentido invalidar sessão nenhuma no
+-- momento em que a migration roda; só passa a valer a partir do primeiro
+-- logout de cada usuário/super-admin depois dela aplicada.
+--
+-- Efeito colateral intencional: logout invalida TODAS as sessões abertas
+-- daquele usuário (todos os dispositivos), não só a que clicou em Sair --
+-- mesmo comportamento de "sair de todos os lugares" já usado por
+-- plataformas grandes, e mais simples/seguro que um esquema por-token
+-- (jti), que exigiria tabela de denylist + limpeza periódica.
+ALTER TABLE usuarios ADD COLUMN sessoes_invalidas_antes_de timestamptz;
+ALTER TABLE super_admins ADD COLUMN sessoes_invalidas_antes_de timestamptz;

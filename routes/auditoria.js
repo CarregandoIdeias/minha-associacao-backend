@@ -10,6 +10,7 @@ const { autenticar, bloquearSenhaProvisoria, bloquearTrialExpirado, exigirPlano,
 const { registrarLogAuditoria } = require('../utils/auditoria');
 const { gerarPdfLogs } = require('../utils/exportarLogs');
 const { inteiroPositivo } = require('../utils/validacao');
+const { limiteExportacao } = require('../middleware/rateLimiter');
 
 const router = express.Router();
 router.use(autenticar);
@@ -92,7 +93,7 @@ router.get('/', autorizar('admin', 'diretoria', 'financeiro', 'atendimento', 'op
 
 // GET /auditoria/exportar/:formato — mesmos filtros, sem paginação. Mesmo
 // gate de plano Avançado da listagem acima.
-router.get('/exportar/:formato', autorizar('admin', 'diretoria', 'financeiro', 'atendimento', 'operador', 'consulta'), exigirPlano('avancado'), async (req, res) => {
+router.get('/exportar/:formato', autorizar('admin', 'diretoria', 'financeiro', 'atendimento', 'operador', 'consulta'), exigirPlano('avancado'), limiteExportacao, async (req, res) => {
     const { formato } = req.params;
     if (formato !== 'pdf') {
         return res.status(400).json({ erro: 'formato deve ser "pdf"' });

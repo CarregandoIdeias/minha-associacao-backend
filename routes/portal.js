@@ -3,6 +3,7 @@
 const express = require('express');
 const { autenticar, bloquearSenhaProvisoria, bloquearTrialExpirado, autorizar, comConexaoTenant } = require('../middleware/auth');
 const { imagemBase64Valida, comprovanteBase64Valido } = require('../utils/validacao');
+const { limiteUpload } = require('../middleware/rateLimiter');
 
 const paramUuid = require('../middleware/paramUuid');
 const router = express.Router();
@@ -57,7 +58,7 @@ router.get('/meus-dados', async (req, res) => {
 });
 
 // PUT /portal/minha-foto — atualiza a foto do associado vinculado ao usuário logado
-router.put('/minha-foto', async (req, res) => {
+router.put('/minha-foto', limiteUpload, async (req, res) => {
     const { foto_base64 } = req.body;
 
     if (!foto_base64) {
@@ -145,7 +146,7 @@ router.get('/minhas-cobrancas', async (req, res) => {
 });
 
 // PUT /portal/minhas-cobrancas/:id/comprovante — associado envia comprovante de pagamento
-router.put('/minhas-cobrancas/:id/comprovante', async (req, res) => {
+router.put('/minhas-cobrancas/:id/comprovante', limiteUpload, async (req, res) => {
     const { id } = req.params;
     const { comprovante_base64 } = req.body;
 
