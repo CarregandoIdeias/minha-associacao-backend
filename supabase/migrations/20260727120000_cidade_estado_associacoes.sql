@@ -6,5 +6,17 @@
 -- tentar recriar o schema do zero num projeto novo. Aditiva, segura a
 -- qualquer momento.
 
-ALTER TABLE associacoes ADD COLUMN cidade varchar;
+-- CORRIGIDO em 08/08/2026, pela conferência de drift da auditoria de
+-- segurança (SEC-030): este arquivo declarava `cidade varchar`, mas
+-- produção tem `cidade text` -- resquício de as duas colunas terem sido
+-- criadas à mão lá em 24/07, antes de existir migration pra elas. Note a
+-- assimetria na própria produção: `estado` é varchar, `cidade` é text.
+--
+-- Sem impacto funcional: no PostgreSQL, `text` e `varchar` sem limite são
+-- o mesmo tipo na prática (mesma representação, operadores, desempenho e
+-- comportamento de índice) -- a diferença só existe no catálogo. O ajuste
+-- aqui é pra este arquivo descrever o schema real de produção, de forma
+-- que recriar o staging do zero produza um banco idêntico em vez de
+-- reintroduzir a divergência.
+ALTER TABLE associacoes ADD COLUMN cidade text;
 ALTER TABLE associacoes ADD COLUMN estado varchar;
