@@ -150,6 +150,62 @@ Staging e produção **nunca compartilham role, senha, `JWT_SECRET` ou
 `BOOTSTRAP_SECRET`** — são projetos totalmente independentes, só o *schema*
 é o mesmo.
 
+## Conferência de drift: comparar produção com staging (08/08/2026)
+
+O terceiro caso de drift previsto na seção acima apareceu, e a conferência
+foi feita — **sem `pg_dump`**. Em vez de reconstruir o "esperado" parseando
+os `.sql` (frágil) ou instalar ferramenta nova, rodar a **mesma** query de
+inventário nos dois projetos e comparar os hashes. Staging foi montado a
+partir desta pasta, então divergência = drift.
+
+Saída de 5 linhas, o que contorna o limite de 100 linhas do SQL Editor:
+
+```sql
+WITH inventario AS (
+  SELECT 'COLUNA ' || c.table_name || '.' || c.column_name || ' ' || c.data_type
+         || CASE WHEN c.is_nullable = 'NO' THEN ' NOTNULL' ELSE '' END
+         || COALESCE(' DEFAULT ' || c.column_default, '') AS item
+  FROM information_schema.columns c
+  JOIN information_schema.tables t
+    ON t.table_schema = c.table_schema AND t.table_name = c.table_name AND t.table_type = 'BASE TABLE'
+  WHERE c.table_schema = 'public'
+  UNION ALL
+  SELECT 'POLICY ' || tablename || '.' || policyname || ' ' || cmd FROM pg_policies WHERE schemaname = 'public'
+  UNION ALL
+  SELECT 'INDICE ' || tablename || '.' || indexname FROM pg_indexes WHERE schemaname = 'public'
+  UNION ALL
+  SELECT 'ENUM ' || t.typname || '.' || e.enumlabel
+  FROM pg_enum e JOIN pg_type t ON t.oid = e.enumtypid
+  JOIN pg_namespace n ON n.oid = t.typnamespace AND n.nspname = 'public'
+  UNION ALL
+  SELECT 'RLS ' || c.relname || ' enabled=' || c.relrowsecurity::text || ' forced=' || c.relforcerowsecurity::text
+  FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+  WHERE n.nspname = 'public' AND c.relkind = 'r'
+)
+SELECT split_part(item, ' ', 1) AS categoria, COUNT(*) AS itens,
+       md5(string_agg(item, E'\n' ORDER BY item)) AS hash
+FROM inventario GROUP BY 1 ORDER BY 1;
+```
+
+Quando um hash diverge, faça o drill-down só daquela categoria (hash por
+tabela para `COLUNA`, listagem direta para `RLS`, que são poucas linhas).
+
+**O que essa conferência achou, e vale saber antes da próxima:**
+
+1. **`enabled=false` com `forced=true` é RLS DESLIGADO.** `FORCE` não faz
+   nada sem `ENABLE`. Staging estava assim em `usuarios`, `comunicados`,
+   `pagamentos` e `password_resets` — policies existindo e nunca aplicadas,
+   o que silenciosamente esvaziava todo teste de isolamento feito lá nessas
+   tabelas. Produção estava correta. Corrigido com `ENABLE ROW LEVEL
+   SECURITY` nas 4.
+2. **Não trate staging como referência sem checar o RLS antes** — foi essa
+   suposição que quase fez o diagnóstico concluir que o problema era em
+   produção.
+3. A única divergência de schema real era `associacoes.cidade` (`text` em
+   produção, `varchar` na migration). Sem impacto — no PostgreSQL os dois
+   são o mesmo tipo na prática. O arquivo da migration foi corrigido pra
+   descrever o que produção tem.
+
 ## Antes de aplicar uma migration em produção
 
 1. Faça backup do banco no Supabase (ou ao menos confirme que a mudança é

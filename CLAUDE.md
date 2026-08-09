@@ -4,6 +4,223 @@ Contexto rápido para sessões de IA trabalhando neste repositório. Para o
 quadro completo (rotas, modelo de dados, roadmap), ver `README.md`. Para
 tudo sobre migrações e RLS, ver `supabase/README.md`.
 
+## ⚠️ O ACHADO MAIS GRAVE: produção rodou 10 dias com código de 27/07 (08/08/2026)
+
+**Auditoria completa de segurança pedida pelo usuário. O achado principal
+não foi uma vulnerabilidade nova — foi descobrir que nenhuma das correções
+anteriores estava em produção.**
+
+Todo o trabalho de segurança de 29/07, 30/07 e 07/08 (as duas auditorias
+documentadas mais abaixo neste arquivo, incluindo o XSS armazenado
+"corrigido" e o vazamento de flag de RLS "corrigido") foi feito e testado
+na branch `staging` e **nunca mesclado em `main`**. O Render faz deploy de
+`main`; o Vercel de produção idem. Resultado: `origin/main` estava 27
+commits atrás no backend e 44 no painel.
+
+Confirmado ao vivo, não por leitura de documentação:
+
+| Verificação | Resultado |
+|---|---|
+| `git log origin/main..origin/staging` (backend) | 27 commits |
+| `GET https://…backend.onrender.com/auditoria` | `404 Cannot GET` — rota de 27/07 não existia |
+| `escapeHtml` no `index.html` servido pela Vercel | ainda `textContent → innerHTML` (não escapava aspas) |
+
+Ou seja: o XSS armazenado com roubo de sessão estava **ativo em produção**,
+nas duas camadas (front sem escape de aspas, backend sem `textoLivreValido`
+em `observacao`), junto com o vazamento de flag de RLS, o IP forjável nos
+logs, o `exceljs` com ~10 CVEs, e tudo mais.
+
+**Lição de processo, mais importante que qualquer item técnico**: "corrigido
+e testado em staging" não é "corrigido". Enquanto existir a branch
+`staging`, todo relatório de correção precisa dizer explicitamente em qual
+ambiente a correção está. Um `git log origin/main..origin/staging` no fim de
+qualquer rodada de trabalho custa nada e teria evitado 10 dias de exposição.
+
+**Ordem obrigatória ao mesclar depois de um atraso desses**: migrations
+primeiro, código depois. O `SELECT` de `autenticar()` referencia colunas
+novas (`senha_alterada_em` etc.) — subir o código antes da coluna existir
+faz **nenhuma requisição autenticar**, outage total em vez de degradação.
+As 9 migrations pendentes foram aplicadas uma a uma (nunca coladas juntas,
+ver o incidente do SQL Editor em `supabase/README.md`) antes do merge.
+
+## Fase 2 da auditoria — revogação de sessão e limites (08/08/2026)
+
+**Logout passou a revogar de verdade** (era só registro de evento; um token
+roubado valia até 8h mesmo depois de "Sair"). Coluna
+`sessoes_invalidas_antes_de` em `usuarios` e `super_admins` (migration
+`20260809000000_revogacao_logout.sql`, nullable e **sem** `DEFAULT now()` —
+diferente de `senha_alterada_em`, aqui não faz sentido invalidar sessão
+nenhuma no momento em que a migration roda).
+
+`middleware/auth.js` ganhou `tokenInvalidadoPor(payload, timestamp)`,
+extraído de propósito: a comparação `payload.iat` vs timestamp arredondado
+pro mesmo segundo agora acontece em 4 lugares (2 timestamps × 2 funções de
+autenticação), e já houve um bug real de arredondamento nesse ponto (ver
+seção de 29/07). Uma função só, um lugar pra errar.
+
+**`POST /superadmin/logout` é rota nova** — não existia. `superadmin.html`
+só limpava o `localStorage`, nunca chamava a API. **Efeito colateral
+intencional**: o logout invalida todas as sessões daquele usuário (todos os
+dispositivos), não só a que clicou em Sair — mais simples e mais seguro que
+denylist por `jti`, que exigiria tabela e limpeza periódica.
+
+Outros itens da mesma fase:
+- `limiteExportacao` (10/h), `limiteUpload` (20/h) e `limiteBootstrap`
+  (5/15min) em `middleware/rateLimiter.js` — exportação de PDF monta até
+  5000 linhas em memória numa instância única, e upload aceita ~2,8MB de
+  base64; só o limite geral de 1000/15min não bastava.
+- `limiteLoginPorConta` — bloqueio por e-mail, **junto** com o limite por
+  IP, não no lugar dele. Sem isso, um atacante com muitos IPs tentava sem
+  limite contra a mesma conta. Usa `keyGenerator` lendo `req.body.email`,
+  o que só funciona porque `express.json()` roda antes dos routers.
+- `POST /superadmin/bootstrap` passou a exigir `senhaForte()` (aceitava 6
+  caracteres sem nenhuma outra regra, na conta com poder sobre todos os
+  tenants).
+- `POST /superadmin/login` ganhou `HASH_INEXISTENTE_SUPERADMIN` (compare
+  descartável) e `lower(email)` — a defesa de enumeração por timing que
+  `/auth/login` tinha desde 07/08, e o login de super-admin não.
+
+**Limitação aceita, não nova**: os limitadores usam store em memória, por
+processo. Se o Render rodar múltiplas instâncias, cada uma tem seu contador.
+Vale igual pros limitadores antigos — não é regressão desta fase, mas
+confere a contagem de instâncias antes de confiar nesses números.
+
+## Fase 3 da auditoria — bloqueio por assinatura vencida e validações (08/08/2026)
+
+**Assinatura paga vencida passou a bloquear acesso** (antes só o trial
+expirado bloqueava; uma associação em plano pago com assinatura vencida
+seguia com acesso integral). Decisão de produto confirmada com o usuário
+antes de implementar.
+
+`utils/precos.js` ganhou `assinaturaBloqueadaPorVencimento()` e
+`DIAS_TOLERANCIA_ASSINATURA_VENCIDA = 5`. **Não** mexe em
+`statusAssinatura()`, que continua marcando `'vencida'` no dia 0 — aquilo é
+badge informativo, isto é bloqueio de acesso, e a tolerância existe porque
+a cobrança é manual (Pix + comprovante + aprovação do Super Admin), não
+instantânea. `bloquearAssinaturaVencida` (`middleware/auth.js`) entra nos 8
+routers de tenant, **nunca em `routes/plano.js`** — mesmo raciocínio de
+`bloquearTrialExpirado`: é a rota que precisa continuar funcionando pra
+associação sair do bloqueio. `GET /plano` expõe
+`bloqueio_assinatura_vencida` como fonte única de verdade pro front, em vez
+de duplicar a conta de data no cliente.
+
+**`GET /superadmin/associacoes/:id/associados` não devolve mais `cpf`** — o
+Super Admin não precisa do documento de cada associado de cada tenant pra
+suporte/cobrança da plataforma. Escopo deliberadamente **menor** que o
+relatório sugeria: do lado do tenant o CPF continua completo, porque a
+equipe da associação usa isso pra confirmar identidade e a ficha reaproveita
+o mesmo array de `GET /associados` (não existe rota de detalhe separada) —
+mascarar ali quebraria uso real.
+
+**`GET /superadmin/associacoes/:id` trocou `SELECT *` por lista explícita
+sem `logo_url`** (era a logo inteira em base64, até ~2,8MB, numa tela que
+não usa). Isso exigiu a rota nova `GET /superadmin/associacoes/:id/logo`,
+porque `abrirEdicaoAssociacao` no painel dependia daquele campo — mesmo
+padrão sob demanda já usado pra comprovante.
+
+Demais itens: `textoLivreValido` em `titulo`/`conteudo` de comunicados (e no
+broadcast do Super Admin, que multiplica por tenant); `nomeValido` em
+`associados.nome_completo` (fechava o mesmo vetor de falsificação de log já
+corrigido em `usuarios`, aberto por outra porta); whitelist em `status`,
+`plano`, `tipo_acao` e `dataValida` nos filtros de data (viravam 500 do
+Postgres); handler 404 em JSON; e invalidação de `password_resets` pendentes
+em toda troca de senha.
+
+**Migration achada durante a implementação, não no plano**:
+`20260809010000_superadmin_bypass_password_resets.sql`. `password_resets` só
+tinha policy de tenant e de `auth_bypass` — sem bypass do Super Admin, o
+`UPDATE` de invalidação em `PATCH /associacoes/:id/resetar-senha-admin`
+rodaria afetando **0 linhas, sem erro nenhum**. Mesmo padrão de bug já
+documentado sobre `configuracoes_plataforma`.
+
+## Fase 4 da auditoria — hardening (08/08/2026)
+
+**`CUSTO_BCRYPT = 11`** em `utils/validacao.js`, aplicado nos 13 pontos que
+passavam `10` literal. O relatório sugeria 12; **mudei pra 11 com base em
+medição**, não em preferência: `bcryptjs` é JS puro e deu ~90ms no custo 10,
+~165ms no 11 e ~300ms no 12 — numa instância pequena do Render, single
+thread atendendo todo o resto, 12 vira 600ms+ por login. 11 dobra o trabalho
+do atacante offline (que é o ponto) sem esse pedágio.
+
+Os dois `HASH_INEXISTENTE` **têm que usar a mesma constante** — existem pra
+gastar o mesmo tempo de CPU do caminho normal (defesa de enumeração); num
+custo diferente dos hashes reais, a diferença de tempo volta. Hashes já
+gravados continuam no custo com que foram criados (o bcrypt guarda o custo
+dentro do hash), então mudar a constante não invalida nem reprocessa nada.
+
+**`pool.query` direto deixou de existir nas rotas.** `middleware/auth.js`
+ganhou `comConexaoSemTenant()` / `queryNeutra()` / `conexaoNeutra`, e as ~20
+chamadas em `routes/auth.js`, `routes/superadmin.js` e no próprio
+`autenticarSuperAdmin` passaram a declarar as três flags de sessão. Nenhuma
+delas tinha risco real (tocavam `super_admins`, sem RLS; logs, com
+`WITH CHECK (true)`; `configuracoes_plataforma`, com `USING (true)`) — mas o
+invariante "toda conexão declara as três flags" tinha esse furo, e uma rota
+nova usando `pool.query` numa tabela de tenant herdaria o GUC da requisição
+anterior, que é exatamente a classe do incidente de 07/08.
+
+**O import de `pool` foi removido dos dois routes de propósito** — sem ele
+no arquivo, não dá pra voltar a usar `pool.query` direto sem perceber. É a
+parte que faz a regra valer sozinha, sem depender de alguém lembrar.
+
+`conexaoNeutra` tem a forma de um client (`{ query }`) justamente pra poder
+ser passada onde `registrarLogAuditoria`/`registrarEventoAuth` esperam uma
+conexão, o que deixou a troca ser um rename mecânico — sem reestruturar
+`try/finally` em 20 lugares, que é onde uma conversão manual vazaria conexão.
+
+## Conferência de drift de schema — e RLS desligado em staging (08/08/2026)
+
+O `supabase/README.md` já registrava 2 casos de mudança feita direto em
+produção sem virar migration, e recomendava conferir o schema real se
+aparecesse um terceiro. Feito.
+
+**Método**: em vez de reconstruir o "esperado" parseando os `.sql` (frágil),
+rodar a **mesma** query de inventário em produção e em staging e comparar
+hash por categoria. A query está em `supabase/README.md` — reusar em vez de
+reinventar. Saída pequena (5 linhas), com drill-down por tabela quando um
+hash diverge, o que contorna o limite de 100 linhas do SQL Editor.
+
+**O achado não foi onde a hipótese previa.** Produção estava correta; o
+defeito estava no staging:
+
+| Tabela | Produção | Staging (antes) |
+|---|---|---|
+| `usuarios`, `comunicados`, `pagamentos`, `password_resets` | RLS ligado | **RLS DESLIGADO** |
+
+`relforcerowsecurity` (`forced`) **não faz nada** se `relrowsecurity`
+(`enabled`) for false — as policies existiam e nunca eram aplicadas. Como o
+`baseline_schema.sql` roda `ENABLE ROW LEVEL SECURITY` nessas tabelas, isso
+não é o que as migrations produzem: alguém rodou `DISABLE` em algum momento,
+provavelmente depurando o incidente de 27/07.
+
+**Por que isso importa mais do que "é só staging"**: staging é onde se
+valida mudança de RLS antes de produção. Com o RLS desligado, **qualquer
+teste de isolamento naquelas 4 tabelas passava com ou sem policy**. Foi
+exatamente o que aconteceu com a migration
+`20260809010000_superadmin_bypass_password_resets.sql` da Fase 3: o teste
+que a deu como validada era **vazio** — o `UPDATE` funcionaria de qualquer
+jeito. Revalidada depois contra produção (com RLS ligado), aí sim de
+verdade. Testes que usaram `associados`/`cobrancas` seguem válidos, essas
+duas estavam corretas nos dois ambientes.
+
+Corrigido com `ENABLE ROW LEVEL SECURITY` nas 4 tabelas de staging. O risco
+era baixo por um motivo concreto: **o hash das 38 policies batia exatamente
+entre os dois ambientes**, e produção roda com RLS ligado nessas mesmas
+tabelas, com esse mesmo conjunto de policies, funcionando. Verificado depois
+(login dos dois tipos, `UPDATE` em `usuarios` via `PUT /auth/senha`, e as 4
+listagens principais).
+
+**Única divergência de schema em todo o inventário**: `associacoes.cidade` é
+`text` em produção e era `varchar` na migration — resquício de `cidade`/
+`estado` terem sido criadas à mão em 24/07 (note a assimetria na própria
+produção: `estado` é varchar). Sem impacto funcional (no PostgreSQL, `text`
+e `varchar` sem limite são o mesmo tipo na prática). O arquivo da migration
+foi corrigido pra declarar o tipo real. Todo o resto — 168 colunas, 54
+valores de enum, 41 índices, 38 policies — idêntico entre os dois ambientes.
+
+**Se for conferir de novo**: não trate staging como referência sem antes
+checar o RLS. Foi essa suposição que quase fez o diagnóstico concluir a
+coisa errada.
+
 ## CAUSA RAIZ da instabilidade intermitente: RLS castando GUC vazio (07/08/2026)
 
 **Isto resolve o mistério aberto desde 26/07** (ver seção "Instabilidade
@@ -1445,6 +1662,19 @@ que também existe) — o Postgres recusa fisicamente misturar dados entre
 associações, porque `app_runtime` não é dona das tabelas e as policies
 estão com `FORCE ROW LEVEL SECURITY`. Testado em produção: dois tenants
 de teste, admin de um não conseguia ver dado do outro.
+
+**Duas ressalvas aprendidas depois, que essa afirmação sozinha esconde**
+(as duas já corrigidas, ver as seções no topo deste arquivo):
+
+1. `FORCE` **não vale nada sem `ENABLE`** — e staging ficou com o RLS
+   desligado em 4 tabelas justamente assim, policies presentes e nunca
+   aplicadas. Conferir `relrowsecurity` (não só `relforcerowsecurity`)
+   antes de afirmar que o isolamento está de pé num ambiente.
+2. A afirmação já foi verdadeira **só por sorte** uma vez (07/08): as flags
+   de bypass vazavam entre requisições pelo pool, e o que segurava era o
+   `WHERE associacao_id = $1` manual, não o banco. Se for reescrever este
+   trecho, não transforme "as policies existem" em "o isolamento está
+   garantido" sem verificar as duas coisas.
 
 ## Convenções
 
