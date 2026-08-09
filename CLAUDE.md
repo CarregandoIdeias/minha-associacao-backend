@@ -217,6 +217,46 @@ e `varchar` sem limite são o mesmo tipo na prática). O arquivo da migration
 foi corrigido pra declarar o tipo real. Todo o resto — 168 colunas, 54
 valores de enum, 41 índices, 38 policies — idêntico entre os dois ambientes.
 
+## SEC-029 — backup manual via SQL, sem plano pago do Supabase (09/08/2026)
+
+O plano atual do Supabase não inclui backup automático, e não há
+`pg_dump`/`psql`/CLI do Supabase instalados nesta máquina (confirmado na
+auditoria). **Mitigação, não solução**: `scripts/backup-manual.js`, sob
+demanda, não agendado.
+
+Usa o `pg` que o backend já traz como dependência — nenhuma ferramenta
+nova. Abre uma conexão, liga o mesmo bypass de RLS que o Super Admin usa
+(`app.superadmin_bypass = 'true'`, sem tenant), descobre as tabelas de
+`public` via `information_schema` e grava cada uma como
+`<tabela>.json` (array de linhas) + `_manifesto.json` com contagens.
+Puramente `SELECT` — `app_runtime` não teria DDL de qualquer forma.
+
+**De propósito, não usa `config/env.js`** — aquele módulo exige
+`JWT_SECRET`/`CORS_ORIGINS` quando `NODE_ENV=production`, o que não tem
+nada a ver com backup. Lê `DATABASE_URL` direto do ambiente.
+
+**Pasta de saída fica fora dos dois repositórios git**
+(`minha_associacao/backups/`, um nível acima de `backend/` e `painel/` —
+a pasta `minha_associacao` em si não é repositório). Elimina de vez o
+risco de CPF/RG/dado financeiro ir parar num commit por engano; não
+precisou de entrada em nenhum `.gitignore`.
+
+**Rodar contra produção sem tocar no `.env` local** (que aponta pra
+staging — ver `supabase/README.md`), pra não repetir o risco de esquecer
+de reverter (incidente de 27/07 documentado acima):
+```powershell
+$env:DATABASE_URL = "postgres://...producao..."; node scripts/backup-manual.js; Remove-Item Env:\DATABASE_URL
+```
+
+Testado contra staging: 15 tabelas, dados íntegros (tipos e datas
+preservados no JSON).
+
+**Não cobre**: schema (já 100% versionado em `supabase/migrations/`, e a
+conferência de drift acima confirma que produção bate com o que elas
+produzem) e restauração (não foi pedida; o formato — um array de objetos
+JSON por tabela — torna trivial escrever um script de `INSERT` linha a
+linha se precisar no futuro).
+
 **Se for conferir de novo**: não trate staging como referência sem antes
 checar o RLS. Foi essa suposição que quase fez o diagnóstico concluir a
 coisa errada.
