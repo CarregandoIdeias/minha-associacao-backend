@@ -1,6 +1,6 @@
 # Documentação — Plataforma para Associações
 
-**Produto:** Sistema de gestão multi-tenant para associações, com camada de Super Admin (SaaS)
+**Produto:** ASSOCIA PLUS — sistema de gestão multi-tenant para associações, com camada de Super Admin (SaaS)
 **Mantido por:** Julião — Carregando Ideias
 **Última atualização:** 30 de julho de 2026
 
@@ -18,11 +18,11 @@ Plataforma SaaS para gestão de associações (moradores, classe profissional, e
 
 | Camada | Tecnologia | Onde está |
 |---|---|---|
-| Backend | Node.js + Express | Render — `https://minha-associacao-backend.onrender.com` |
+| Backend | Node.js + Express | Render — `https://associa-plus-backend.onrender.com` |
 | Banco de dados | PostgreSQL | Supabase (conexão via Session Pooler, compatível com IPv4) |
 | Painel da associação | HTML/CSS/JS puro (sem framework) | Vercel — `index.html` |
 | Painel do Super Admin | HTML/CSS/JS puro (arquivo separado) | Vercel — `superadmin.html` (mesmo domínio do painel) |
-| Repositórios | GitHub | `CarregandoIdeias/minha-associacao-backend`, `CarregandoIdeias/minha-associacao-painel` |
+| Repositórios | GitHub | `CarregandoIdeias/associa-plus-backend`, `CarregandoIdeias/associa-plus-painel` |
 
 **Ambiente de homologação (staging, desde 27/07/2026):** segundo ambiente completo e isolado — projeto Supabase próprio (plano Free), Web Service próprio no Render (branch `staging` deste repo), projeto Vercel próprio (branch `staging` do repo do painel). Front-end resolve `API_URL` automaticamente pelo hostname (`localhost`/domínio contendo "staging" → backend de staging; qualquer outro → produção) — não é um valor fixo trocado manualmente, então **não existe divergência de código entre `main` e `staging`** nesse ponto. Fluxo de trabalho: mudanças arriscadas (schema, RLS, auth) são testadas em `staging` primeiro, só depois mescladas em `main`. Ver `CLAUDE.md` para o runbook completo de como recriar o ambiente do zero.
 
@@ -138,7 +138,7 @@ O backend conecta ao Postgres como `app_runtime`, uma role criada especificament
 O Supabase concede acesso total (`SELECT/INSERT/UPDATE/DELETE`) por padrão às roles `anon` e `authenticated` (usadas pela API pública/PostgREST dele) em toda tabela nova — essa aplicação não usa essa API, só o Postgres via este backend. Esses grants foram revogados em todas as tabelas (`supabase/migrations/20260724000200_revogar_acesso_publico_supabase.sql`), incluindo `ALTER DEFAULT PRIVILEGES` para que tabelas futuras não saiam com esse acesso. **Isso importa especialmente em `super_admins`**, que não tem RLS (não tem coluna de tenant) — sem essa revogação, qualquer um com a chave pública `anon` do projeto Supabase conseguiria ler/gravar super-admins direto pela API do Supabase, sem passar pelo backend.
 
 ### ✅ CORS restrito
-Só `https://minha-associacao-painel.vercel.app` (via `CORS_ORIGINS`) tem acesso à API. Antes aceitava qualquer origem.
+Só `https://associa-plus-painel.vercel.app` (via `CORS_ORIGINS`) tem acesso à API. Antes aceitava qualquer origem.
 
 ### ✅ Segredos centralizados (`config/env.js`)
 `JWT_SECRET`, `DATABASE_URL` e `CORS_ORIGINS` são lidos de um único lugar (`config/env.js`), que **derruba o processo na inicialização** se algum estiver faltando em produção — antes, cada arquivo tinha sua própria cópia com um valor padrão fraco de fallback.
@@ -294,7 +294,7 @@ DATABASE_URL=<connection string do Supabase — Session Pooler, usuário app_run
 JWT_SECRET=<segredo forte e único>
 PORT=3000
 NODE_ENV=production
-CORS_ORIGINS=https://minha-associacao-painel.vercel.app
+CORS_ORIGINS=https://associa-plus-painel.vercel.app
 BOOTSTRAP_SECRET=<segredo forte, usado só para criar o primeiro super-admin>
 DB_POOL_MAX=10
 ```
